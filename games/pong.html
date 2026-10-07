@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>PONG</title>
+<link rel="stylesheet" href="../kit/tokens.css">
+<link rel="stylesheet" href="../kit/bundle.css">
+<style>
+  html, body { height: 100%; }
+  /* The kit's stage is min(94vw, 420px) wide with the canvas capped at 84vh; on a short
+     window that cap squashes the 420x640 aspect. Size the column by height too. */
+  .cp-stage-portrait { width: min(94vw, 420px, calc(84vh * 420 / 640)); }
+  .cp-canvas-portrait { box-sizing: border-box; outline: none; }
+  /* An absolutely placed canvas keeps its intrinsic size, so the HUD layer is stretched explicitly. */
+  .cp-layer { box-sizing: border-box; border: 2px solid transparent; width: 100%; height: 100%; }
+  .cp-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+</style>
+</head>
+<body class="cp-page">
+<div class="cp-stage-portrait">
+  <div class="cp-holder">
+    <canvas id="game" class="cp-canvas-portrait" width="420" height="640" aria-label="Pong playfield"></canvas>
+    <div class="cp-vignette"></div>
+    <canvas id="hud" class="cp-layer" width="420" height="640"></canvas>
+  </div>
+  <div class="cp-hint">drag to move, swipe up to smash</div>
+</div>
+<div id="say" class="cp-sr" role="status" aria-live="polite"></div>
+
+<script src="../kit/bundle.js"></script>
+<script>
+(function(){
+  const CP = window.ClassicPlus;
+  const C = CP.COLORS;
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const hudCanvas = document.getElementById('hud');
+  const hudCtx = hudCanvas.getContext('2d');
+  const sayEl = document.getElementById('say');
+  function say(text){ sayEl.textContent = ''; sayEl.textContent = text; }
+
+  // Logic and every position live in a fixed 420x640 space; the backing store
+  // follows the displayed size and devicePixelRatio so it stays crisp.
+  const W = 420, H = 640;
+  function fitCanvasToDisplaySize(){
+    const dpr = window.devicePixelRatio || 1;
+    const cw = canvas.clientWidth, ch = canvas.clientHeight;
+    if (cw <= 0 || ch <= 0) return;
+    const bw = Math.max(1, Math.round(cw * dpr)), bh = Math.max(1, Math.round(ch * dpr));
+    if (canvas.width !== bw || canvas.height !== bh) {
+      canvas.width = bw; canvas.height = bh;
+      hudCanvas.width = bw; hudCanvas.height = bh;
+    }
+    // Map 420x640 onto the whole backing store (the CSS box rounds to within a pixel of it).
+    ctx.setTransform(bw / W, 0, 0, bh / H, 0, 0);
+    hudCtx.setTransform(bw / W, 0, 0, bh / H, 0, 0);
+  }
+  fitCanvasToDisplaySize();
+  let resizePending = false;
+  function scheduleResize(){
+    if (resizePending) return;
+    resizePending = true;
+    requestAnimationFrame(() => { resizePending = false; fitCanvasToDisplaySize(); });
+  }
+  if (window.ResizeObserver) new ResizeObserver(scheduleResize).observe(canvas);
+  window.addEventListener('resize', scheduleResize);
+
+  // ---- Sound: the game's own clicky blips, played on the kit synth's context so the
+  // shell's volume, mute and hidden-tab suspend apply to every voice. ----
+  const syn = CP.createSynth();
+  const SCALE = {
+    G3: 196.00, A3: 220.00, C4: 261.63, D4: 293.66, E4: 329.63, G4: 392.00,
+    A4: 440.00, C5: 523.25, D5: 587.33, E5: 659.25, G5: 783.99, A5: 880.00
+  };
+  const COMBO_NOTES = [SCALE.C5, SCALE.D5, SCALE.E5, SCALE.G5, SCALE.A5];
+  function audio(){
+    const ac = syn.context();
+    return ac && !syn.muted && syn.volume > 0 && ac.state !== 'closed' ? ac : null;
+  }
+  function playTone(freq, opts){
+    opts = opts || {};
+    const ac = audio(); if (!ac) return;
+    const duration = opts.duration || 0.08;
+    const gain = (opts.gain || 0.16) * syn.volume;
+    const attack = opts.attack || 0.002;
+    const now = ac.currentTime + (opts.delay || 0);
+    const osc = ac.createOscillator();
+    osc.type = opts.type || 'square';
+    osc.frequency.setValueAtTime(freq, now);
+    if (opts.sweepTo) osc.frequency.exponentialRampToValueAtTime(opts.sweepTo, now + duration);
+    const g = ac.createGain();
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.exponentialRampToValueAtTime(gain, now + attack);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+    osc.connect(g).connect(ac.destination);
+    osc.start(now);
+    osc.stop(now + duration + 0.02);
+  }
+  function playClick(opts){
+    opts = opts || {};
+    const ac = audio(); if (!ac) return;
+    const duration = opts.duration || 0.015;
+    const gain = (opts.gain || 0.1) * syn.volume;
+    const now = ac.currentTime;
+    const n = Math.max(1, Math.floor(ac.sampleRate * duration));
+    const buffer = ac.createBuffer(1, n, ac.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < n; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / n);
+    const src = ac.createBufferSource(); src.buffer = buffer;
+    const filt = ac.createBiquadFilter(); filt.type = 'highpass'; filt.frequency.value = opts.hp || 1500;
+    const g = ac.createGain();
+    g.gain.setValueAtTime(gain, now);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+    src.connect(filt).connect(g).connect(ac.destination);
+    src.start(now);
+  }
+  function spinFactorFor(vx){ return Math.min(1, Math.abs(vx || 0) / MAX_PADDLE_VX_FOR_SPIN); }
+  function hitSound(base, vx, dur, clickGain, gain){
+    const sf = spinFactorFor(vx), spinny = sf > 0.45, freq = spinny ? base / 2 : base;
+    playClick({ duration: clickGain > 0.12 ? 0.012 : 0.008, gain: clickGain });
+    playTone(freq, { duration: dur * (1 + sf * 1.4), type: 'square', gain, sweepTo: spinny ? freq / 2 : null });
+  }
+  function sfxPaddleHit(vx){ hitSound(SCALE.A4, vx, 0.045, 0.1, 0.14); }
+  function sfxSmashHit(vx){ hitSound(SCALE.C4, vx, 0.065, 0.16, 0.2); }
+  function sfxCpuHit(vx){ hitSound(SCALE.D4, vx, 0.045, 0.08, 0.11); }
+  function sfxWallBounce(){ playClick({ duration: 0.007, gain: 0.07 }); playTone(SCALE.E5, { duration: 0.035, type: 'triangle', gain: 0.09 }); }
+  function sfxSmashSwipe(){ playClick({ duration: 0.014, gain: 0.13 }); playTone(SCALE.G3, { duration: 0.055, type: 'square', gain: 0.15, sweepTo: SCALE.A3 }); }
+  function sfxPegBreak(m){
+    const note = COMBO_NOTES[Math.min(Math.max(m, 1), COMBO_NOTES.length) - 1];
+    playClick({ duration: 0.008, gain: 0.08 });
+    playTone(note, { duration: 0.4, type: 'triangle', gain: 0.19, attack: 0.003 });
+    playTone(note * 2, { duration: 0.25, type: 'sine', gain: 0.08, attack: 0.003 });
+  }
+  function sfxGoal(){ playTone(SCALE.A4, { duration: 0.055, gain: 0.15 }); playTone(SCALE.C5, { duration: 0.08, gain: 0.16, delay: 0.055 }); }
+  function sfxLifeLost(){ playTone(SCALE.E4, { duration: 0.07, gain: 0.15 }); playTone(SCALE.A3, { duration: 0.11, gain: 0.14, delay: 0.07 }); }
+  function sfxGameOver(){ [SCALE.E4, SCALE.D4, SCALE.C4, SCALE.A3].forEach((f, i) => playTone(f, { duration: 0.1, gain: 0.15, delay: i * 0.085 })); }
+  function sfxServe(){ playClick({ duration: 0.009, gain: 0.08 }); playTone(SCALE.A4, { duration: 0.035, gain: 0.1 }); }
+
+  // ---- Constants ----
+  const PADDLE_W = 70, PADDLE_H = 20;
+  const BALL_SIZE = 16;
+  const PLAYER_REST_Y = H - 90 - PADDLE_H;
+  const CPU_Y = 90;
+  const STARTING_LIVES = 3;
+  const POST_POINT_DELAY = 0.38;   // game seconds between rallies
+  const KB_SPEED = 7;              // px per 60Hz frame
+
+  // Ground: slowly cycles through dark, low-saturation colours as the score
+  // climbs (the game's own endless progress sky). Every step keeps ink 14:1
+  // and every peg colour 3.9:1 or better (work/pong/contrast.js).
+  const BG_PALETTE = [
+    { r: 42, g: 36, b: 25 }, { r: 26, g: 32, b: 42 }, { r: 36, g: 28, b: 42 },
+    { r: 24, g: 38, b: 36 }, { r: 42, g: 28, b: 30 }
+  ];
+  const BG_POINTS_PER_STEP = 1000;
+  const BG_EASE = 0.03;
+  let bgColor = { ...BG_PALETTE[0] };
+  function getTargetBgColor(){
+    const idx = Math.floor(score / BG_POINTS_PER_STEP);
+    const t = (score % BG_POINTS_PER_STEP) / BG_POINTS_PER_STEP;
+    const a = BG_PALETTE[idx % BG_PALETTE.length], b = BG_PALETTE[(idx + 1) % BG_PALETTE.length];
+    return { r: a.r + (b.r - a.r) * t, g: a.g + (b.g - a.g) * t, b: a.b + (b.b - a.b) * t };
+  }
+
+  // Score pegs: each point scored adds one to a formation in the middle; the ball breaks
+  // them for bonus points. Colours are the kit's brick tokens (the source's purple
+  // failed 3:1 on its own grounds, so it became brick-hard); colour carries no meaning.
+  const SQUARE_CORE_OFFSET = 34, SQUARE_RING_CAPACITY = 8, SQUARE_RING_STEP = 30, SQUARE_EASE = 0.18;
+  const PEG_COLORS = [C.brickRed, C.brickOrange, C.brickGreen, C.brickYellow, C.brickHard];
+  let scoreSquares = [];
+  function computeSquareCenters(count){
+    const c = [], d = SQUARE_CORE_OFFSET, X = W / 2, Y = H / 2;
+    if (count <= 0) return c;
+    if (count === 1) c.push({ x: X, y: Y });
+    else if (count === 2) c.push({ x: X - d, y: Y }, { x: X + d, y: Y });
+    else if (count === 3) c.push({ x: X - d, y: Y + d }, { x: X + d, y: Y + d }, { x: X, y: Y - d });
+    else if (count === 4) c.push({ x: X - d, y: Y }, { x: X + d, y: Y }, { x: X, y: Y - d }, { x: X, y: Y + d });
+    else if (count === 5) c.push({ x: X - d, y: Y - d }, { x: X + d, y: Y - d }, { x: X, y: Y }, { x: X - d, y: Y + d }, { x: X + d, y: Y + d });
+    else if (count === 6) { const s = d * 1.1; for (const ry of [-s, 0, s]) c.push({ x: X - d, y: Y + ry }, { x: X + d, y: Y + ry }); }
+    else {
+      c.push({ x: X - d, y: Y }, { x: X + d, y: Y }, { x: X, y: Y - d }, { x: X, y: Y + d });
+      let remaining = count - 4, ring = 1;
+      while (remaining > 0) {
+        const inRing = Math.min(remaining, SQUARE_RING_CAPACITY), radius = d + ring * SQUARE_RING_STEP;
+        for (let i = 0; i < inRing; i++) {
+          const a = (i / inRing) * Math.PI * 2 + ring * 0.3 + Math.PI / 4;
+          c.push({ x: X + radius * Math.cos(a), y: Y + radius * Math.sin(a) });
+        }
+        remaining -= inRing; ring++;
+      }
+    }
+    return c;
+  }
+  function reflowScoreSquares(){
+    const centers = computeSquareCenters(scoreSquares.length);
+    for (let i = 0; i < scoreSquares.length; i++) {
+      scoreSquares[i].targetX = centers[i].x - BALL_SIZE / 2;
+      scoreSquares[i].targetY = centers[i].y - BALL_SIZE / 2;
+    }
+  }
+  function addScoreSquare(){
+    pegCount++;
+    const color = PEG_COLORS[(pegCount - 1) % PEG_COLORS.length];
+    scoreSquares.push({ x: W / 2 - BALL_SIZE / 2, y: H / 2 - BALL_SIZE / 2, targetX: 0, targetY: 0, hit: false, color });
+    reflowScoreSquares();
+  }
+
+  // Peg chips: hard-edged 2px squares that burst out and drift, swirled by the ball when
+  // it passes close (the game's own vortex; PixelBurst leaves such forces to the game).
+  // All timings are game time, so pause freezes them.
+  const PARTICLE_COUNT = 50, PARTICLE_SIZE = 2, PARTICLE_SPEED_MIN = 3.0, PARTICLE_SPEED_MAX = 9.0;
+  const PARTICLE_LIFETIME_MS = 5000;
+  const COMBO_WINDOW_MS = PARTICLE_LIFETIME_MS;
+  const PARTICLE_FRICTION = 0.90, PARTICLE_MIN_DRIFT_SPEED = 0.15;
+  const PARTICLE_VORTEX_RADIUS = 45, PARTICLE_VORTEX_STRENGTH = 0.9, PARTICLE_VORTEX_MIN_DIST = 10;
+  let particles = [];
+  function spawnBurst(cx, cy, color){
+    for (let i = 0; i < PARTICLE_COUNT; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const sp = PARTICLE_SPEED_MIN + Math.random() * (PARTICLE_SPEED_MAX - PARTICLE_SPEED_MIN);
+      particles.push({ x: cx, y: cy, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, startTime: gameMs(), color: color || C.ink });
+    }
+  }
+  function updateParticles(f){
+    const now = gameMs();
+    particles = particles.filter(p => now - p.startTime < PARTICLE_LIFETIME_MS);
+    const bx = ball.x + BALL_SIZE / 2, by = ball.y + BALL_SIZE / 2, fr = Math.pow(PARTICLE_FRICTION, f);
+    for (const p of particles) {
+      const dx = bx - p.x, dy = by - p.y;
+      const dist = Math.max(PARTICLE_VORTEX_MIN_DIST, Math.sqrt(dx * dx + dy * dy));
+      if (dist < PARTICLE_VORTEX_RADIUS) {
+        const nx = dx / dist, ny = dy / dist, s = PARTICLE_VORTEX_STRENGTH * (1 - dist / PARTICLE_VORTEX_RADIUS) * f;
+        p.vx += (-ny + nx * 0.25) * s;
+        p.vy += (nx + ny * 0.25) * s;
+      }
+      p.vx *= fr; p.vy *= fr;
+      const speed = Math.sqrt(p.vx * p.vx + p.vy * p.vy);
+      if (speed > 0.0001 && speed < PARTICLE_MIN_DRIFT_SPEED) { const k = PARTICLE_MIN_DRIFT_SPEED / speed; p.vx *= k; p.vy *= k; }
+      p.x += p.vx * f; p.y += p.vy * f;
+    }
+  }
+  function drawParticles(){
+    const now = gameMs();
+    for (const p of particles) {
+      const t = (now - p.startTime) / PARTICLE_LIFETIME_MS;
+      ctx.globalAlpha = t < 0.2 ? 1 : Math.max(0, 1 - (t - 0.2) / 0.8);
+      ctx.fillStyle = p.color;
+      ctx.fillRect(Math.round(p.x - PARTICLE_SIZE / 2), Math.round(p.y - PARTICLE_SIZE / 2), PARTICLE_SIZE, PARTICLE_SIZE);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // Spin: the paddle's sideways speed at impact kicks the ball and leaves a fading curve.
+  const SPIN_IMPACT_FACTOR = 0.4, SPIN_CARRY_FACTOR = 0.6, SPIN_ACCEL = 0.06, SPIN_DECAY = 0.97;
+  const MAX_PADDLE_VX_FOR_SPIN = 20, MAX_SPIN = 6, MAX_BALL_VX = 20;
+  const clamp = CP.clamp;
+
+  // Smash: a quick upward swipe (or the SMASH key) snaps the paddle forward and back.
+  const NUDGE_DISTANCE = 55, NUDGE_OUT_MS = 1, NUDGE_HOLD_MS = 10, NUDGE_BACK_MS = 90;
+  const SWIPE_UP_PX = 30, SWIPE_WINDOW_MS = 160;
+  let nudgeState = 'idle', nudgeStartTime = 0, pointerYSamples = [];
+
+  // Smash beam: hard-edged steps above the paddle that fade over 200ms (no gradient:
+  // the kit allows only three). Restarts at most every 340ms, so it never strobes past 3/s.
+  const BEAM_LENGTH = 130, BEAM_DURATION_MS = 200, BEAM_MAX_ALPHA = 0.55, BEAM_MIN_GAP_MS = 340, BEAM_STEPS = 5;
+  let beamStartTime = -Infinity;
+
+  function triggerNudge(){
+    if (nudgeState !== 'idle') return;
+    nudgeState = 'out';
+    nudgeStartTime = gameMs();
+    if (nudgeStartTime - beamStartTime >= BEAM_MIN_GAP_MS) beamStartTime = nudgeStartTime;
+    sfxSmashSwipe();
+  }
+  function trackPointerY(clientY){
+    const now = performance.now();
+    pointerYSamples.push({ t: now, y: clientY });
+    while (pointerYSamples.length && now - pointerYSamples[0].t > SWIPE_WINDOW_MS) pointerYSamples.shift();
+    if (pointerYSamples.length > 1) {
+      const rect = canvas.getBoundingClientRect();
+      const travel = (pointerYSamples[0].y - pointerYSamples[pointerYSamples.length - 1].y) * H / Math.max(1, rect.height);
+      if (travel > SWIPE_UP_PX) { triggerNudge(); pointerYSamples = []; }
+    }
+  }
+  function updateNudge(now){
+    if (nudgeState === 'idle') { playerY = PLAYER_REST_Y; return; }
+    const elapsed = now - nudgeStartTime;
+    if (nudgeState === 'out') {
+      if (elapsed >= NUDGE_OUT_MS) { nudgeState = 'hold'; nudgeStartTime = now; playerY = PLAYER_REST_Y - NUDGE_DISTANCE; }
+      else { const t = elapsed / NUDGE_OUT_MS; playerY = PLAYER_REST_Y - NUDGE_DISTANCE * (1 - Math.pow(1 - t, 3)); }
+    } else if (nudgeState === 'hold') {
+      playerY = PLAYER_REST_Y - NUDGE_DISTANCE;
+      if (elapsed >= NUDGE_HOLD_MS) { nudgeState = 'back'; nudgeStartTime = now; }
+    } else if (nudgeState === 'back') {
+      if (elapsed >= NUDGE_BACK_MS) { nudgeState = 'idle'; playerY = PLAYER_REST_Y; }
+      else { const t = elapsed / NUDGE_BACK_MS; playerY = PLAYER_REST_Y - NUDGE_DISTANCE * (1 - t * t); }
+    }
+  }
+
+  // Ghost trails (kit GhostTrail), velocities smoothed in game time.
+  const GHOST_SMOOTH = 0.85, NUDGE_GHOST_SMOOTH = 0.975;
+  let sPlayerVX = 0, sPlayerVY = 0, sCpuVX = 0, sBallVX = 0, sBallVY = 0;
+
+  // Paddle hit: a short glow on the paddle that connects.
+  const HIT_FLASH_MS = 180;
+  let playerFlashUntil = 0, cpuFlashUntil = 0;
+
+  // ---- State ----
+  let playerX, cpuX, playerY, prevPlayerX, prevCpuX, prevPlayerY;
+  let score, lives, comboMultiplier, comboWindowEnd, running, serveAt, serveDir, rallyCount, serveGraceUntil, pendingPlayerPeg;
+  let goals, pegsBroken, pegCount, lastServe;
+  const ball = { x: W / 2 - BALL_SIZE / 2, y: H / 2 - BALL_SIZE / 2, vx: 0, vy: 0, speed: 5, spin: 0 };
+  const SERVE_GRACE_MS = 300;
+
+  let shell = null;
+  function gameMs(){ return shell ? shell.time * 1000 : 0; }
+
+  function resetGame(){
+    score = 0; lives = STARTING_LIVES; goals = 0; pegsBroken = 0; pegCount = 0;
+    comboMultiplier = 0; comboWindowEnd = 0;
+    playerX = W / 2 - PADDLE_W / 2; cpuX = W / 2 - PADDLE_W / 2; playerY = PLAYER_REST_Y;
+    prevPlayerX = playerX; prevCpuX = cpuX; prevPlayerY = playerY;
+    sPlayerVX = sPlayerVY = sCpuVX = sBallVX = sBallVY = 0;
+    nudgeState = 'idle'; pointerYSamples = []; beamStartTime = -Infinity;
+    playerFlashUntil = cpuFlashUntil = 0;
+    scoreSquares = []; particles = [];
+    pendingPlayerPeg = false; serveGraceUntil = 0; rallyCount = 0;
+    ball.x = W / 2 - BALL_SIZE / 2; ball.y = H / 2 - BALL_SIZE / 2; ball.vx = ball.vy = 0; ball.spin = 0;
+    running = false;
+    // First serve after the same short beat as between rallies.
+    serveAt = POST_POINT_DELAY; serveDir = Math.random() < 0.5 ? -1 : 1;
+    if (shell) shell.setScore(0);
+  }
+
+  function resetBall(direction){
+    ball.x = W / 2; ball.y = H / 2; ball.speed = 5; ball.spin = 0;
+    const angle = Math.random() * 0.6 - 0.3;
+    ball.vx = Math.sin(angle) * ball.speed;
+    ball.vy = Math.cos(angle) * ball.speed * direction;
+    rallyCount = 0;
+  }
+  function startRound(direction){
+    resetBall(direction);
+    if (pendingPlayerPeg) { addScoreSquare(); pendingPlayerPeg = false; }
+    serveGraceUntil = gameMs() + SERVE_GRACE_MS;
+    running = true;
+    sfxServe();
+  }
+  function afterPoint(dir){ running = false; serveAt = shell.time + POST_POINT_DELAY; serveDir = dir; }
+
+  // ---- Shell ----
+  shell = CP.createShell({
+    id: 'cp-pong', canvas: canvas, layout: 'portrait', synth: syn,
+    title: 'PONG',
+    howTo: ['GET THE BALL PAST THE TOP PADDLE', 'SMASH TO HIT IT HARD', 'BREAK THE PEGS FOR BONUS POINTS'],
+    actions: [
+      { id: 'left', label: 'MOVE LEFT', keys: ['arrowleft'], hold: true, group: 'move' },
+      { id: 'right', label: 'MOVE RIGHT', keys: ['arrowright'], hold: true, group: 'move' },
+      { id: 'smash', label: 'SMASH', keys: ['arrowup'] },
+      { id: 'drag', label: 'MOVE', display: 'DRAG', fixed: true },
+      { id: 'swipe', label: 'SMASH', display: 'SWIPE UP', fixed: true }
+    ],
+    onAction: id => { if (id === 'smash' && shell.isPlaying()) triggerNudge(); },
+    steering: true,
+    intro: true,
+    onStart: () => resetGame(),
+    onEnd: () => sfxGameOver()
+  });
+  resetGame();
+
+  // ---- Input: drag anywhere to move, swipe up to smash ----
+  function movePlayerTo(clientX){
+    const rect = canvas.getBoundingClientRect();
+    playerX = clamp((clientX - rect.left) * W / rect.width - PADDLE_W / 2, 0, W - PADDLE_W);
+  }
+  canvas.addEventListener('pointerdown', (e) => {
+    canvas.focus({ preventScroll: true });
+    if (!shell.isPlaying()) return;
+    pointerYSamples = [];
+    movePlayerTo(e.clientX);
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    if (!shell.isPlaying()) return;
+    if (e.pointerType !== 'mouse' && !(e.buttons & 1) && e.pressure === 0) return;
+    movePlayerTo(e.clientX);
+    trackPointerY(e.clientY);
+  });
+
+  // ---- Update (game time only) ----
+  function rectsOverlap(ax, ay, aw, ah, bx, by, bw, bh){ return ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by; }
+
+  function updateCPU(f){
+    const center = cpuX + PADDLE_W / 2, diff = ball.x - center;
+    if (Math.abs(diff) > 6) cpuX += Math.sign(diff) * Math.min(4.6, Math.abs(diff) * 0.12 + 2) * f;
+    cpuX = clamp(cpuX, 0, W - PADDLE_W);
+  }
+
+  function update(dt){
+    const f = dt * 60;   // the source ran one step per 60Hz frame
+    const now = gameMs();
+
+    if (!running && serveAt !== null && shell.time >= serveAt) { serveAt = null; startRound(serveDir); }
+
+    const v = KB_SPEED * shell.steering() * f;
+    if (shell.isDown('left')) playerX -= v;
+    if (shell.isDown('right')) playerX += v;
+    playerX = clamp(playerX, 0, W - PADDLE_W);
+    updateNudge(now);
+
+    if (running) {
+      updateCPU(f);
+      if (ball.spin) {
+        ball.vx = clamp(ball.vx + ball.spin * SPIN_ACCEL * f, -MAX_BALL_VX, MAX_BALL_VX);
+        ball.spin *= Math.pow(SPIN_DECAY, f);
+        if (Math.abs(ball.spin) < 0.02) ball.spin = 0;
+      }
+      const SUBSTEPS = 8;
+      let stepVX = ball.vx * f / SUBSTEPS, stepVY = ball.vy * f / SUBSTEPS, bounced = false;
+      const playerVXf = clamp((playerX - prevPlayerX) / f, -MAX_PADDLE_VX_FOR_SPIN, MAX_PADDLE_VX_FOR_SPIN);
+      const cpuVXf = clamp((cpuX - prevCpuX) / f, -MAX_PADDLE_VX_FOR_SPIN, MAX_PADDLE_VX_FOR_SPIN);
+      for (let s = 1; s <= SUBSTEPS && !bounced; s++) {
+        ball.x += stepVX; ball.y += stepVY;
+        if (ball.x <= 0) { ball.x = 0; ball.vx *= -1; stepVX *= -1; sfxWallBounce(); }
+        if (ball.x + BALL_SIZE >= W) { ball.x = W - BALL_SIZE; ball.vx *= -1; stepVX *= -1; sfxWallBounce(); }
+
+        const fpx = prevPlayerX + (playerX - prevPlayerX) * (s / SUBSTEPS);
+        const fpy = prevPlayerY + (playerY - prevPlayerY) * (s / SUBSTEPS);
+        const smashing = nudgeState === 'out' || nudgeState === 'hold';
+        const forgive = Math.min(14, Math.abs(playerVXf) * 0.6);
+        const mx = smashing ? 20 : forgive, my = smashing ? 55 : forgive;
+        if (ball.vy > 0 && rectsOverlap(ball.x, ball.y, BALL_SIZE, BALL_SIZE, fpx - mx, fpy - my, PADDLE_W + mx * 2, PADDLE_H + my * 2)) {
+          ball.y = fpy - BALL_SIZE;
+          const norm = clamp(((ball.x + BALL_SIZE / 2) - (fpx + PADDLE_W / 2)) / (PADDLE_W / 2), -1, 1);
+          ball.speed = Math.min(ball.speed + (smashing ? 2.6 : 0.35), smashing ? 18 : 12);
+          const angle = norm * (smashing ? Math.PI / 4.5 : Math.PI / 3.2);
+          ball.vx = Math.sin(angle) * ball.speed;
+          ball.vy = -Math.cos(angle) * ball.speed;
+          ball.vx = clamp(ball.vx + playerVXf * SPIN_IMPACT_FACTOR, -MAX_BALL_VX, MAX_BALL_VX);
+          ball.spin = clamp(playerVXf * SPIN_CARRY_FACTOR, -MAX_SPIN, MAX_SPIN);
+          rallyCount++; bounced = true;
+          playerFlashUntil = now + HIT_FLASH_MS;
+          if (smashing) sfxSmashHit(playerVXf); else sfxPaddleHit(playerVXf);
+        }
+        if (!bounced && ball.vy < 0 && rectsOverlap(ball.x, ball.y, BALL_SIZE, BALL_SIZE, cpuX, CPU_Y, PADDLE_W, PADDLE_H)) {
+          ball.y = CPU_Y + PADDLE_H;
+          const norm = ((ball.x + BALL_SIZE / 2) - (cpuX + PADDLE_W / 2)) / (PADDLE_W / 2);
+          ball.speed = Math.min(ball.speed + 0.35, 12);
+          const angle = norm * (Math.PI / 3.2);
+          ball.vx = Math.sin(angle) * ball.speed;
+          ball.vy = Math.cos(angle) * ball.speed;
+          ball.vx = clamp(ball.vx + cpuVXf * SPIN_IMPACT_FACTOR, -MAX_BALL_VX, MAX_BALL_VX);
+          ball.spin = clamp(cpuVXf * SPIN_CARRY_FACTOR, -MAX_SPIN, MAX_SPIN);
+          rallyCount++; bounced = true;
+          cpuFlashUntil = now + HIT_FLASH_MS;
+          sfxCpuHit(cpuVXf);
+        }
+      }
+
+      // Pegs: ease into formation; the ball breaks them after the serve grace.
+      const ease = 1 - Math.pow(1 - SQUARE_EASE, f);
+      for (const sq of scoreSquares) { sq.x += (sq.targetX - sq.x) * ease; sq.y += (sq.targetY - sq.y) * ease; }
+      let pegBroken = false;
+      if (now >= serveGraceUntil) {
+        for (const sq of scoreSquares) {
+          if (!sq.hit && rectsOverlap(ball.x, ball.y, BALL_SIZE, BALL_SIZE, sq.x, sq.y, BALL_SIZE, BALL_SIZE)) {
+            sq.hit = true; pegBroken = true; pegsBroken++;
+            comboMultiplier = now <= comboWindowEnd ? comboMultiplier + 1 : 1;
+            comboWindowEnd = now + COMBO_WINDOW_MS;
+            score += 100 * comboMultiplier;
+            sfxPegBreak(comboMultiplier);
+            spawnBurst(sq.x + BALL_SIZE / 2, sq.y + BALL_SIZE / 2, sq.color);
+            if (comboMultiplier >= 2) say('Combo ' + comboMultiplier + ' times.');
+          }
+        }
+      }
+      if (pegBroken) { scoreSquares = scoreSquares.filter(sq => !sq.hit); reflowScoreSquares(); }
+
+      if (ball.y < -BALL_SIZE) {
+        score += 50; goals++;
+        pendingPlayerPeg = true;
+        sfxGoal();
+        say('Point. Score ' + score + '.');
+        afterPoint(1);
+      } else if (ball.y > H + BALL_SIZE) {
+        lives--;
+        if (lives <= 0) {
+          shell.setScore(score);
+          shell.lose({ lines: [String(goals).padStart(2, '0') + ' POINTS WON', String(pegsBroken).padStart(2, '0') + ' PEGS BROKEN'] });
+          return;
+        }
+        sfxLifeLost();
+        say('Life lost. ' + lives + (lives === 1 ? ' life' : ' lives') + ' left.');
+        afterPoint(-1);
+      }
+    }
+    shell.setScore(score);
+
+    updateParticles(f);
+
+    const bg = getTargetBgColor(), be = 1 - Math.pow(1 - BG_EASE, f);
+    bgColor.r += (bg.r - bgColor.r) * be; bgColor.g += (bg.g - bgColor.g) * be; bgColor.b += (bg.b - bgColor.b) * be;
+
+    // Ghost velocities in px per 60Hz frame.
+    const gs = Math.pow(GHOST_SMOOTH, f), ns = Math.pow(NUDGE_GHOST_SMOOTH, f);
+    sPlayerVX = sPlayerVX * gs + ((playerX - prevPlayerX) / f) * (1 - gs);
+    sPlayerVY = sPlayerVY * ns + ((playerY - prevPlayerY) / f) * (1 - ns);
+    sCpuVX = sCpuVX * gs + ((cpuX - prevCpuX) / f) * (1 - gs);
+    sBallVX = sBallVX * gs + (running ? ball.vx : 0) * (1 - gs);
+    sBallVY = sBallVY * gs + (running ? ball.vy : 0) * (1 - gs);
+
+    prevPlayerX = playerX; prevPlayerY = playerY; prevCpuX = cpuX;
+  }
+
+  // ---- Draw ----
+  const grid = CP.createScopeGrid({ color: C.gridPhosphor, centerColor: C.gridPhosphorCenter });
+
+  function drawPaddleWithFlash(x, y, flashUntil, now){
+    const remaining = flashUntil - now;
+    if (remaining > 0) {
+      ctx.save();
+      ctx.shadowColor = C.inkPure; ctx.shadowBlur = 18 * remaining / HIT_FLASH_MS;
+      ctx.fillStyle = C.inkPure; ctx.fillRect(x, y, PADDLE_W, PADDLE_H);
+      ctx.restore();
+    } else CP.drawPaddle(ctx, x, y, PADDLE_W, PADDLE_H);
+  }
+  function drawNet(){
+    ctx.save();
+    ctx.strokeStyle = 'rgba(245,245,245,0.35)';   // decorative centre line
+    ctx.lineWidth = 2; ctx.setLineDash([8, 10]);
+    ctx.beginPath(); ctx.moveTo(0, H / 2); ctx.lineTo(W, H / 2); ctx.stroke();
+    ctx.restore();
+  }
+  function drawSmashBeam(now){
+    const elapsed = now - beamStartTime;
+    if (elapsed < 0 || elapsed >= BEAM_DURATION_MS) return;
+    const t = elapsed / BEAM_DURATION_MS, a = BEAM_MAX_ALPHA * (1 - t) * (1 - t), step = BEAM_LENGTH / BEAM_STEPS;
+    ctx.save(); ctx.fillStyle = C.ink;
+    for (let i = 0; i < BEAM_STEPS; i++) {
+      ctx.globalAlpha = a * (1 - i / BEAM_STEPS);
+      ctx.fillRect(playerX, Math.round(playerY - (i + 1) * step), PADDLE_W, Math.ceil(step));
+    }
+    ctx.restore();
+  }
+
+  function draw(){
+    const now = gameMs();
+    ctx.save();
+    ctx.beginPath(); ctx.rect(0, 0, W, H); ctx.clip();
+    ctx.fillStyle = `rgb(${bgColor.r | 0}, ${bgColor.g | 0}, ${bgColor.b | 0})`;
+    ctx.fillRect(0, 0, W, H);
+    grid.draw(ctx, W, H, playerX + PADDLE_W / 2, ball.y);
+    drawNet();
+    drawSmashBeam(now);
+    for (const sq of scoreSquares) { ctx.fillStyle = sq.color; ctx.fillRect(sq.x, sq.y, BALL_SIZE, BALL_SIZE); }
+    drawParticles();
+
+    CP.drawGhosts(ctx, playerX, playerY, PADDLE_W, PADDLE_H, sPlayerVX, sPlayerVY, C.ink);
+    CP.drawGhosts(ctx, cpuX, CPU_Y, PADDLE_W, PADDLE_H, sCpuVX, 0, C.ink);
+    CP.drawGhosts(ctx, ball.x, ball.y, BALL_SIZE, BALL_SIZE, sBallVX, sBallVY, C.ink);
+
+    drawPaddleWithFlash(playerX, playerY, playerFlashUntil, now);
+    drawPaddleWithFlash(cpuX, CPU_Y, cpuFlashUntil, now);
+    CP.drawBall(ctx, ball.x, ball.y, C.ink, BALL_SIZE);
+    ctx.restore();
+
+    hudCtx.clearRect(0, 0, W, H);
+    const right = shell.hudRight(W);
+    CP.drawHud(hudCtx, W, { score: score, lives: lives, maxLives: STARTING_LIVES, right: right });
+    // Combo: centred like drawHud's chase layout, but slid left of a long score so they never touch.
+    if (comboMultiplier >= 2 && now <= comboWindowEnd) {
+      const txt = comboMultiplier + 'X', half = CP.inkWidth(txt, 1.3) / 2;
+      const cx = Math.min(W / 2, right - CP.inkWidth(String(score), 1.3) - 16 - half);
+      CP.drawVectorText(hudCtx, txt, cx, 44, 1.3, { color: C.ink, align: 'center', glow: 2, glowScale: 1 });
+    }
+  }
+
+  function frame(t){
+    const dt = shell.tick(t);
+    if (dt) update(dt);
+    draw();
+    shell.draw(hudCtx, W, H);
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // Read-only state for automated checks.
+})();
+</script>
+</body>
+</html>

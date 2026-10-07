@@ -1,0 +1,2921 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Asteroids</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%; overflow: hidden;
+    background: #000000;
+    font-family: 'Courier New', monospace;
+  }
+  #wrap {
+    position: relative;
+    width: 100vw;
+    height: 100vh;
+    height: calc(var(--vh, 1vh) * 100);
+    height: 100dvh;
+    display: flex; align-items: center; justify-content: center;
+  }
+  canvas {
+    background: #10141f;
+    display: block;
+    max-width: 100%;
+    max-height: 100%;
+    touch-action: none;
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game"></canvas>
+</div>
+
+<script>
+(function() {
+  // Mobile browsers resize their address bar in/out of view, which makes
+  // 100vh unreliable (it's based on the largest possible viewport, so
+  // bottom-anchored UI like the touch controls can end up just offscreen).
+  // This keeps a corrected --vh custom property in sync as a fallback for
+  // browsers that don't support the newer 100dvh unit.
+  function setVH() {
+    document.documentElement.style.setProperty('--vh', window.innerHeight * 0.01 + 'px');
+  }
+  setVH();
+  window.addEventListener('resize', setVH);
+  window.addEventListener('orientationchange', setVH);
+
+  const canvas = document.getElementById('game');
+
+  // Currency collected from yellow pickups - resets to zero each game over.
+  let currency = 0;
+  const ctx = canvas.getContext('2d');
+  const wrapEl = document.getElementById('wrap');
+  let W, H;
+
+  function resizeCanvas() {
+    // Cap the play area's absolute size so a big desktop monitor doesn't
+    // just stretch the same fixed-size entities across a vastly larger
+    // canvas. Above this cap, the wrap's own flex centering handles
+    // positioning; the boundary itself is drawn in-canvas (dark fade +
+    // faint vector line) rather than as a CSS border/glow.
+    const MAX_CANVAS_W = 1000;
+    const MAX_CANVAS_H = 800;
+    W = canvas.width = Math.round(Math.min(wrapEl.clientWidth, MAX_CANVAS_W));
+    H = canvas.height = Math.round(Math.min(wrapEl.clientHeight, MAX_CANVAS_H));
+    recomputeWarpConstants();
+    recomputeUIScale();
+    buildStars();
+    rebuildVignette();
+    clampEntitiesToBounds();
+  }
+  window.addEventListener('resize', resizeCanvas);
+  window.addEventListener('orientationchange', resizeCanvas);
+
+  const TWO_PI = Math.PI * 2;
+
+  function rand(min, max) { return Math.random() * (max - min) + min; }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function lerpAngle(a, b, t) {
+    let diff = (b - a) % TWO_PI;
+    if (diff > Math.PI) diff -= TWO_PI;
+    if (diff < -Math.PI) diff += TWO_PI;
+    return a + diff * t;
+  }
+  function smoothstep(t) { return t * t * (3 - 2 * t); }
+  function wrap(obj) {
+    if (obj.x < -obj.r) obj.x = W + obj.r;
+    if (obj.x > W + obj.r) obj.x = -obj.r;
+    if (obj.y < -obj.r) obj.y = H + obj.r;
+    if (obj.y > H + obj.r) obj.y = -obj.r;
+  }
+  function dist(a, b) {
+    const dx = a.x - b.x, dy = a.y - b.y;
+    return Math.sqrt(dx*dx + dy*dy);
+  }
+
+  // ---------- Sound (simple WebAudio blips) ----------
+  let audioCtx = null;
+  function getAudioCtx() {
+    if (!audioCtx) {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    return audioCtx;
+  }
+  function beep(freq, duration, type, vol) {
+    try {
+      const ac = getAudioCtx();
+      const osc = ac.createOscillator();
+      const gain = ac.createGain();
+      osc.type = type || 'square';
+      osc.frequency.value = freq;
+      gain.gain.value = (vol !== undefined ? vol : 0.15);
+      osc.connect(gain);
+      gain.connect(ac.destination);
+      osc.start();
+      gain.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + duration);
+      osc.stop(ac.currentTime + duration);
+    } catch (e) {}
+  }
+  const sfx = {
+    fire: () => beep(880, 0.048, 'sine', 0.1),
+    bangLarge: () => beep(120, 0.158, 'sine', 0.18),
+    bangMedium: () => beep(238, 0.154, 'sine', 0.16),
+    bangSmall: () => beep(370, 0.25, 'sine', 0.14),
+    explodeShip: () => beep(60, 0.48, 'sawtooth', 0.2),
+    extraLife: () => beep(741, 0.315, 'triangle', 0.15),
+    saucer: () => beep(424, 0.173, 'triangle', 0.08),
+    hyperspace: () => beep(300, 0.15, 'sine', 0.1),
+    collect: () => beep(1200, 0.04, 'sine', 0.04),
+    pickup: () => { beep(700, 0.081, 'square', 0.12); setTimeout(() => beep(1050, 0.104, 'square', 0.12), 60); },
+    buffUp: () => { beep(500, 0.12, 'triangle', 0.18); setTimeout(() => beep(750, 0.18, 'triangle', 0.18), 90); },
+    heartbeat1: () => beep(55, 0.13, 'triangle', 0.16),
+    heartbeat2: () => beep(50.5, 0.13, 'triangle', 0.16)
+  };
+
+  // ---------- Thrust hiss (filtered noise, fades in/out with held key) ----------
+  let thrustNodes = null;
+  let thrustSoundOn = false;
+
+  function ensureThrustNodes() {
+    if (thrustNodes) return thrustNodes;
+    try {
+      const ac = getAudioCtx();
+      const bufferSize = ac.sampleRate * 2;
+      const buffer = ac.createBuffer(1, bufferSize, ac.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+
+      const noise = ac.createBufferSource();
+      noise.buffer = buffer;
+      noise.loop = true;
+
+      const filter = ac.createBiquadFilter();
+      filter.type = 'bandpass';
+      filter.frequency.value = 934;
+      filter.Q.value = 0.5;
+
+      const gain = ac.createGain();
+      gain.gain.value = 0;
+
+      noise.connect(filter);
+      filter.connect(gain);
+      gain.connect(ac.destination);
+      noise.start();
+
+      thrustNodes = { noise, filter, gain };
+    } catch (e) {}
+    return thrustNodes;
+  }
+
+  function setThrustSound(on) {
+    const nodes = ensureThrustNodes();
+    if (!nodes) return;
+    const ac = getAudioCtx();
+    const now = ac.currentTime;
+    nodes.gain.gain.cancelScheduledValues(now);
+    nodes.gain.gain.setValueAtTime(nodes.gain.gain.value, now);
+    nodes.filter.frequency.cancelScheduledValues(now);
+    nodes.filter.frequency.setValueAtTime(nodes.filter.frequency.value, now);
+    if (on) {
+      nodes.gain.gain.linearRampToValueAtTime(0.06, now + 0.1);
+      nodes.filter.frequency.linearRampToValueAtTime(2002, now + 0.2);
+    } else {
+      nodes.gain.gain.linearRampToValueAtTime(0, now + 0.3);
+      nodes.filter.frequency.linearRampToValueAtTime(667, now + 0.3);
+    }
+  }
+
+  // ---------- Game state ----------
+  let ship, bullets, asteroids, particles, saucer, saucerBullets, trail, pickups;
+  let score = 0, lives = 3, level = 1;
+  let state = 'intro'; // intro, menu, playing, gameover, levelstart
+  let stateTimer = 0;
+  let extraLifeScore = 10000;
+
+  // background slowly cycles hue every 3 waves: dark blue -> purple ->
+  // burgundy -> ... looping back around, eased continuously so it drifts
+  // rather than snapping the instant a new level starts.
+  const BG_HUE_START = 220;   // dark blue
+  const BG_HUE_STEP = 60;     // degrees per 3-wave block (blue -> purple -> burgundy -> ...)
+  const BG_SATURATION = 36;
+  const BG_LIGHTNESS = 12;
+  const BG_EASE = 0.02;
+  let bgHue = BG_HUE_START;
+
+  function targetBgHue() {
+    return (BG_HUE_START + Math.floor((level - 1) / 3) * BG_HUE_STEP) % 360;
+  }
+  function lerpHueDeg(a, b, t) {
+    const diff = ((b - a + 540) % 360) - 180; // shortest signed angular distance
+    return (a + diff * t + 360) % 360;
+  }
+  function updateBgColor() {
+    bgHue = lerpHueDeg(bgHue, targetBgHue(), BG_EASE);
+  }
+  function currentBgColor() {
+    return 'hsl(' + bgHue.toFixed(1) + ',' + BG_SATURATION + '%,' + BG_LIGHTNESS + '%)';
+  }
+
+  // dust gathering + buffs
+  const DUST_THRESHOLD = 100;
+  const BUFF_DURATION = 480; // 8 seconds at 60fps
+  const MAGNET_RADIUS = 140;
+  const MAGNET_SPEED_THRESHOLD = 2.2;
+  const BUFF_TYPES = ['spread', 'rapid', 'shield'];
+  const BUFF_NAMES = { spread: 'SPREAD SHOT', rapid: 'RAPID FIRE', shield: 'SHIELD' };
+  const SHIELD_RADIUS_MULT = 3.4; // ship.r * this = shield ring radius (doubled from original)
+  let dustCollected = 0;
+  let activeBuff = null; // { type, timer }
+  let nextBuffType = null; // queued up while dust collects toward the next activation
+
+  // heartbeat pacing
+  const HEARTBEAT_MAX_FRAMES = 55; // slowest pulse (level just started)
+  const HEARTBEAT_MIN_FRAMES = 14; // fastest pulse (almost cleared)
+  let initialAsteroidCount = 0;
+  let heartbeatTimer = HEARTBEAT_MAX_FRAMES;
+  let heartbeatToggle = false;
+
+  // level-clear hyperspace transition
+  const LEVEL_TRANSITION_FRAMES = 240;
+  const WARP_FADE_START = 0.50; // fraction of transition duration where fly-in ends and fade-out begins
+  const WARP_ASTEROID_SPAWN_T = 0.88; // spawn the new wave once streaks have mostly faded out
+  const WARP_SHIP_MIN_SCALE = 0.20;
+  const ASTEROID_FADE_IN_FRAMES = 60;
+  let WARP_ORIGIN_X = 0;
+  let WARP_ORIGIN_Y = 0; // recomputed on resize - the ship's known end position (screen center)
+  let WARP_CENTER_MASK_RADIUS = 0; // no streaks at all inside this radius
+  let WARP_OUTER_MIN = 0;
+  let WARP_OUTER_MAX = 0; // out toward the corners
+  function recomputeWarpConstants() {
+    WARP_ORIGIN_X = W / 2;
+    WARP_ORIGIN_Y = H / 2;
+    WARP_CENTER_MASK_RADIUS = Math.min(W, H) * 0.20;
+    WARP_OUTER_MIN = WARP_CENTER_MASK_RADIUS * 1.3;
+    WARP_OUTER_MAX = Math.sqrt(W*W + H*H) / 2 * 1.05;
+  }
+
+  // HUD/menu text was sized for the game's original 900x700 reference canvas.
+  // Now that the canvas matches the real screen (often much smaller in
+  // absolute pixels on a phone), scale text/margins down to match, so it
+  // doesn't look oversized on small screens or tiny on large ones.
+  // Global glow reduction: every ctx.shadowBlur value in the game is
+  // multiplied by this, so overall glow intensity can be tuned in one
+  // place rather than hunting down dozens of individual values.
+  const GLOW_SCALE = 0.55;
+  let UI_SCALE = 1;
+  // Asteroid density scale: a fixed asteroid count feels sparser the more
+  // screen area there is to spread across, and denser (more frantic) the
+  // less there is - especially along whichever axis is shortest. Scaling
+  // count by actual screen area (relative to the ~700x700 reference this
+  // game was tuned at) keeps density, and therefore intensity, consistent
+  // across very different window shapes/sizes instead of just leaving a
+  // wide short window naturally more cramped than a tall narrow one.
+  let GAMEPLAY_SCALE = 1;
+  function recomputeUIScale() {
+    UI_SCALE = Math.max(0.55, Math.min(1.4, Math.min(W, H) / 700));
+    GAMEPLAY_SCALE = Math.max(0.7, Math.min(4.0, (W * H) / (700 * 700)));
+  }
+  const WARP_SPAWN_RATE = 13.2; // streaks spawned per frame at full intensity
+  const WARP_GROW_FRAMES = 5;   // snaps to full length almost immediately
+  const WARP_HOLD_FRAMES = 7;   // brief hold at full brightness/length
+  const WARP_SHRINK_FRAMES = 18; // then contracts back to a point and fades
+  const WARP_STREAK_LIFE = WARP_GROW_FRAMES + WARP_HOLD_FRAMES + WARP_SHRINK_FRAMES;
+  let levelSpawnedThisTransition = false;
+  let transitionShip = null; // { startX, startY, startAngle }
+  let warpIntensity = 0;
+  let warpStreaks = [];
+  let warpSpawnAccumulator = 0;
+
+  // ---------- Space station visits ----------
+  // Every WAVES_UNTIL_STATION cleared waves, instead of a new asteroid field
+  // the warp leads to the space station: fly in, dock, then spend currency
+  // in the upgrade shop before the next wave begins.
+  const WAVES_UNTIL_STATION = 4;
+  let wavesSinceStation = 0;
+  let pendingStationVisit = false;
+
+  const STATION_SPIN_RATE = 0.0018;
+  const STATION_SPIN_MULTIPLIER = 1;
+  const ENGINE_PUSH_RADIUS_RATIO = 0.55;
+  const ENGINE_PUSH_FORCE = 0.06;
+  // The 4 corner engine shapes (Engine1/path60/Engine4/path62) at the
+  // concave inner corners of the cross, where adjacent arms meet - computed
+  // from each shape's centroid in the updated station SVG.
+  const ENGINE_LOCAL_OFFSETS = [
+    { x: -0.34779, y:  0.34778 }, // "Engine1" (bottom-left)
+    { x: -0.34779, y: -0.34778 }, // "path60"  (top-left)
+    { x:  0.34772, y:  0.34778 }, // "Engine4" (bottom-right)
+    { x:  0.34772, y: -0.34778 }  // "path62"  (top-right)
+  ];
+  // Landing pads: the new station is a symmetric cross, so all 4 arm tips
+  // are identical pads. Each pad is the outer half of its arm - from the
+  // hub boundary out to the tip - defined here as ratios of the station's
+  // own width (both come out to clean 0.25/0.5 given the source SVG's
+  // exact 2:1 proportions).
+  const PAD_HALF_WIDTH_RATIO = 0.25;   // half the arm's thickness
+  const PAD_OUTER_DIST_RATIO = 0.5;    // distance from center to the arm tip
+  const PAD_DEPTH_PX = 75;             // flat pixel depth (tuned previously, kept as-is regardless of station size)
+  // 4 directions in the station's own local space, each as an outward unit
+  // vector plus its perpendicular (for measuring how centered the ship is
+  // across the opening).
+  const STATION_PAD_DIRECTIONS = [
+    { ox: 1, oy: 0, px: 0, py: 1 },   // right
+    { ox: -1, oy: 0, px: 0, py: 1 },  // left
+    { ox: 0, oy: 1, px: 1, py: 0 },   // bottom
+    { ox: 0, oy: -1, px: 1, py: 0 }   // top
+  ];
+  // Collision hull: the union of the two body rects (a plus shape), so
+  // being inside means being within the vertical bar's width OR the
+  // horizontal bar's width - this matches STATION_BODY_RECTS almost
+  // exactly, just expressed as ratios for the collision check.
+  const STATION_HULL_HALF_THICKNESS_RATIO = 0.25;
+
+  let station = null; // { x, y, width, alpha, angle, parked, arrival }
+  let stationEngineSmoke = [];
+  let stationDockFadeT = 0;
+  let stationShopFadeT = 0;
+  let stationShopMessage = '';
+  let stationShopMessageTimer = 0;
+  let stationSelectedCard = 0;
+  let dockingResultText = '';
+
+  const keys = {};
+
+  function newShip() {
+    return {
+      x: W/2, y: H/2,
+      vx: 0, vy: 0,
+      angle: -Math.PI/2,
+      r: 14,
+      thrusting: false,
+      canShoot: true,
+      shootCooldown: 0,
+      invincible: 120,
+      blinkOn: true,
+      hyperCooldown: 0,
+      scale: 1
+    };
+  }
+
+  function resetGame() {
+    score = 0;
+    lives = 3;
+    level = 1;
+    currency = 0;
+    bgHue = BG_HUE_START;
+    ship = newShip();
+    bullets = [];
+    saucerBullets = [];
+    particles = [];
+    trail = [];
+    pickups = [];
+    saucer = null;
+    extraLifeScore = 10000;
+    dustCollected = 0;
+    activeBuff = null;
+    nextBuffType = pickRandomBuffType();
+    wavesSinceStation = 0;
+    pendingStationVisit = false;
+    station = null;
+    stationEngineSmoke = [];
+    stationDockFadeT = 0;
+    stationShopFadeT = 0;
+    stationSelectedCard = 0;
+    stationShopPage = 0;
+    stationShopLine = '';
+    dockingResultText = '';
+    for (const u of UPGRADES) {
+      if (u.type === 'onetime') u.owned = false;
+      else { u.level = 0; u.purchasedThisVisit = false; }
+    }
+    missiles = [];
+    totalShotsFired = 0;
+    droneBaseAngle = 0;
+    droneCooldowns = [0, 0, 0];
+    startLevel();
+  }
+
+  function startLevel() {
+    asteroids = [];
+    const num = Math.max(1, Math.round((3 + level) * GAMEPLAY_SCALE));
+    for (let i = 0; i < num; i++) {
+      spawnAsteroid('large');
+    }
+    initialAsteroidCount = asteroids.length;
+    heartbeatTimer = HEARTBEAT_MAX_FRAMES;
+  }
+
+  function spawnAsteroid(size, x, y) {
+    let r;
+    if (size === 'large') r = 45;
+    else if (size === 'medium') r = 25;
+    else r = 13;
+
+    if (x === undefined) {
+      // spawn away from ship
+      do {
+        x = rand(0, W);
+        y = rand(0, H);
+      } while (ship && dist({x,y}, ship) < 150);
+    }
+
+    const angle = rand(0, TWO_PI);
+    const speedBase = size === 'large' ? 1 : size === 'medium' ? 1.6 : 2.4;
+    const speed = rand(speedBase*0.5, speedBase);
+
+    const verts = [];
+    const vertCount = Math.floor(rand(8, 13));
+    for (let i = 0; i < vertCount; i++) {
+      verts.push(rand(0.75, 1.25));
+    }
+
+    asteroids.push({
+      x, y, r, size,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      angle: rand(0, TWO_PI),
+      spin: rand(-0.02, 0.02),
+      verts,
+      spawnTimer: 0
+    });
+  }
+
+  function breakAsteroid(a) {
+    const idx = asteroids.indexOf(a);
+    if (idx >= 0) asteroids.splice(idx, 1);
+
+    if (a.size === 'large') {
+      score += 20; sfx.bangLarge();
+      for (let i = 0; i < 2; i++) spawnAsteroid('medium', a.x, a.y);
+    } else if (a.size === 'medium') {
+      score += 50; sfx.bangMedium();
+      for (let i = 0; i < 2; i++) spawnAsteroid('small', a.x, a.y);
+    } else {
+      score += 100; sfx.bangSmall();
+    }
+    spawnDebris(a.x, a.y, 16);
+    maybeSpawnPickup(a.x, a.y);
+    checkExtraLife();
+    updateHud();
+
+    checkLevelComplete();
+  }
+
+  function checkLevelComplete() {
+    if (state === 'playing' && asteroids.length === 0 && !saucer) {
+      state = 'levelstart';
+      stateTimer = LEVEL_TRANSITION_FRAMES;
+      level++;
+      transitionShip = { startX: ship.x, startY: ship.y, startAngle: ship.angle };
+      ship.vx = 0;
+      ship.vy = 0;
+      warpIntensity = 0;
+      particles = [];
+      trail = [];
+      levelSpawnedThisTransition = false;
+      activeBuff = null;
+      warpStreaks = [];
+      warpSpawnAccumulator = 3;
+      bullets = [];
+      saucerBullets = [];
+      pickups = [];
+      missiles = [];
+
+      wavesSinceStation++;
+      if (wavesSinceStation >= WAVES_UNTIL_STATION) {
+        wavesSinceStation = 0;
+        pendingStationVisit = true;
+      } else {
+        pendingStationVisit = false;
+      }
+    }
+  }
+
+  function checkExtraLife() {
+    if (score >= extraLifeScore) {
+      lives++;
+      extraLifeScore += 10000;
+      sfx.extraLife();
+      updateHud();
+    }
+  }
+
+  const MAX_PARTICLES = 500;
+
+  function spawnDebris(x, y, count) {
+    for (let i = 0; i < count; i++) {
+      const angle = rand(0, TWO_PI);
+      const speed = rand(1, 4.5);
+      const life = rand(360, 700); // dust lingers for a long time
+      particles.push({
+        x, y,
+        vx: Math.cos(angle)*speed,
+        vy: Math.sin(angle)*speed,
+        life: life,
+        maxLife: life,
+        size: rand(1, 3),
+        r: 2.5
+      });
+    }
+    // keep the total bounded so long-lived dust doesn't accumulate forever
+    if (particles.length > MAX_PARTICLES) {
+      particles.splice(0, particles.length - MAX_PARTICLES);
+    }
+  }
+
+  function updateHud() {
+    // HUD is drawn fresh from game state each frame in drawHud(); nothing to sync here.
+  }
+
+  // ---------- Saucer ----------
+  let saucerTimer = 300;
+  function maybeSpawnSaucer() {
+    if (saucer) return;
+    saucerTimer--;
+    if (saucerTimer <= 0) {
+      const fromLeft = Math.random() < 0.5;
+      saucer = {
+        x: fromLeft ? -30 : W + 30,
+        y: rand(80, H - 80),
+        vx: fromLeft ? rand(1.5, 2.5) : -rand(1.5, 2.5),
+        vy: 0,
+        r: 32,
+        shootTimer: 60,
+        changeTimer: 90,
+        large: Math.random() < 0.5
+      };
+      saucerTimer = rand(600, 1200);
+    }
+  }
+
+  function updateSaucer() {
+    if (!saucer) return;
+    saucer.x += saucer.vx;
+    saucer.changeTimer--;
+    if (saucer.changeTimer <= 0) {
+      saucer.vy = rand(-1.5, 1.5);
+      saucer.changeTimer = rand(40, 90);
+    }
+    saucer.y += saucer.vy;
+    if (saucer.y < 30) saucer.y = 30;
+    if (saucer.y > H - 30) saucer.y = H - 30;
+
+    saucer.shootTimer--;
+    if (saucer.shootTimer <= 0) {
+      saucer.shootTimer = rand(60, 100);
+      sfx.saucer();
+      let angle;
+      if (saucer.large) {
+        angle = rand(0, TWO_PI);
+      } else {
+        angle = Math.atan2(ship.y - saucer.y, ship.x - saucer.x) + rand(-0.2, 0.2);
+      }
+      saucerBullets.push({
+        x: saucer.x, y: saucer.y,
+        vx: Math.cos(angle) * 5,
+        vy: Math.sin(angle) * 5,
+        life: 90
+      });
+    }
+
+    if (saucer.x < -50 || saucer.x > W + 50) {
+      saucer = null;
+      checkLevelComplete();
+    }
+  }
+
+  // ---------- Input ----------
+  window.addEventListener('keydown', (e) => {
+    if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Space'].includes(e.code)) {
+      e.preventDefault();
+    }
+    keys[e.code] = true;
+
+    if (state === 'shop') {
+      const pageItems = currentPageUpgrades();
+      const cols = 2, rows = 2;
+      const pages = totalShopPages();
+      const hasPages = pages > 1;
+      const LEAVE_INDEX = pageItems.length; // slot right after this page's items
+      const PREV_INDEX = pageItems.length + 1;
+      const NEXT_INDEX = pageItems.length + 2;
+
+      if (e.code === 'Enter' || e.code === 'Space') {
+        if (stationSelectedCard === LEAVE_INDEX) leaveStationShop();
+        else if (stationSelectedCard === PREV_INDEX) changeShopPage(-1);
+        else if (stationSelectedCard === NEXT_INDEX) changeShopPage(1);
+        else if (pageItems[stationSelectedCard]) purchaseUpgrade(pageItems[stationSelectedCard]);
+        return;
+      }
+      if (e.code === 'Escape' || e.code === 'Backspace') {
+        leaveStationShop();
+        return;
+      }
+      if (hasPages && (e.code === 'KeyQ' || e.code === 'BracketLeft')) {
+        changeShopPage(-1);
+        return;
+      }
+      if (hasPages && (e.code === 'KeyE' || e.code === 'BracketRight')) {
+        changeShopPage(1);
+        return;
+      }
+
+      if (stationSelectedCard === LEAVE_INDEX) {
+        // only up/down are meaningful from the Leave slot (it spans the row)
+        if (e.code === 'ArrowUp') stationSelectedCard = (rows - 1) * cols;
+        else if (e.code === 'ArrowDown') stationSelectedCard = 0;
+        else return;
+        return;
+      }
+      if (stationSelectedCard === PREV_INDEX) {
+        if (e.code === 'ArrowRight') stationSelectedCard = 0;
+        else if (e.code === 'ArrowDown') stationSelectedCard = LEAVE_INDEX;
+        else return;
+        return;
+      }
+      if (stationSelectedCard === NEXT_INDEX) {
+        if (e.code === 'ArrowLeft') stationSelectedCard = 1;
+        else if (e.code === 'ArrowDown') stationSelectedCard = LEAVE_INDEX;
+        else return;
+        return;
+      }
+
+      let col = stationSelectedCard % cols;
+      let row = Math.floor(stationSelectedCard / cols);
+      if (e.code === 'ArrowLeft') {
+        if (col === 0 && hasPages) { stationSelectedCard = PREV_INDEX; return; }
+        col = (col - 1 + cols) % cols;
+      } else if (e.code === 'ArrowRight') {
+        if (col === cols - 1 && hasPages) { stationSelectedCard = NEXT_INDEX; return; }
+        col = (col + 1) % cols;
+      } else if (e.code === 'ArrowUp')    { row = (row - 1 + rows) % rows; }
+      else if (e.code === 'ArrowDown') {
+        if (row === rows - 1) { stationSelectedCard = LEAVE_INDEX; return; }
+        row++;
+      } else {
+        return;
+      }
+      stationSelectedCard = Math.min(pageItems.length, row * cols + col);
+      return;
+    }
+
+    if (e.code === 'Enter') {
+      if (state === 'intro') {
+        state = 'menu';
+        getAudioCtx();
+      } else if (state === 'menu' || state === 'gameover') {
+        resetGame();
+        state = 'playing';
+        getAudioCtx();
+      }
+    }
+  });
+  window.addEventListener('keyup', (e) => {
+    keys[e.code] = false;
+  });
+
+  canvas.addEventListener('touchstart', () => {
+    if (state === 'intro') {
+      state = 'menu';
+      getAudioCtx();
+    } else if (state === 'menu' || state === 'gameover') {
+      resetGame();
+      state = 'playing';
+      getAudioCtx();
+    }
+  });
+
+  // Drag-anywhere virtual joystick: wherever a finger first touches down
+  // becomes the neutral center. Horizontal offset from that point steers
+  // (analog - a slight drag turns slightly, a full drag turns at full
+  // speed); dragging up thrusts (also analog); dragging down past a
+  // threshold fires. No visible buttons - the whole canvas is the control
+  // surface, and multiple simultaneous touches are supported.
+  const DRAG_DEADZONE = 6;          // px of slack before any input registers
+  const DRAG_TURN_RANGE = 55;       // px of horizontal drag for full turn speed
+  const DRAG_THRUST_RANGE = 28;     // px dragged up for full thrust
+  const DRAG_FIRE_THRESHOLD = 33;   // px dragged down to trigger fire (only used if USE_FIRE_BUTTON is false)
+  // A dedicated on-screen fire button (bottom-left circle): any touch
+  // currently positioned inside it fires, for as long as it's held,
+  // regardless of how many other fingers are on screen doing other things.
+  // That finger is purely for firing and doesn't also drive steering/thrust.
+  // Set to false to revert to the original slide-down-to-fire gesture.
+  const USE_FIRE_BUTTON = true;
+  const FIRE_BUTTON_RADIUS = 56;   // in UI_SCALE units, matches the drawn hint circle
+  const FIRE_BUTTON_MARGIN = 26;
+  const dragPointers = new Map(); // pointerId -> {startX, startY, x, y, canvasX, canvasY}
+  let dragTurnInput = 0;    // -1..1, analog
+  let dragThrustInput = 0;  // 0..1, analog
+  let dragFireActive = false;
+
+  function clamp01(v) { return Math.max(0, Math.min(1, v)); }
+
+  function canvasLocalXY(e) {
+    // Raw screen pixels, not canvas-space: these coordinates are only ever
+    // used as deltas (distance dragged), never as absolute in-game
+    // positions, so keeping them in real screen pixels means the drag feel
+    // stays consistent regardless of how much the canvas is scaled down
+    // (e.g. a small portrait-mode display).
+    const rect = canvas.getBoundingClientRect();
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  }
+  function canvasSpaceXY(e) {
+    // Absolute canvas-space coordinates (matching W/H), for UI hit-testing
+    // like shop cards, where actual position (not just delta) matters.
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width, scaleY = canvas.height / rect.height;
+    return { x: (e.clientX - rect.left) * scaleX, y: (e.clientY - rect.top) * scaleY };
+  }
+
+  function fireButtonGeometry() {
+    const radius = FIRE_BUTTON_RADIUS * UI_SCALE;
+    const margin = FIRE_BUTTON_MARGIN * UI_SCALE;
+    return { cx: margin + radius, cy: H - margin - radius, radius };
+  }
+  function isInFireButton(canvasX, canvasY) {
+    const g = fireButtonGeometry();
+    return Math.hypot(canvasX - g.cx, canvasY - g.cy) <= g.radius;
+  }
+
+  function recomputeDragInputs() {
+    dragTurnInput = 0;
+    dragThrustInput = 0;
+    dragFireActive = false;
+    for (const p of dragPointers.values()) {
+      if (USE_FIRE_BUTTON && isTouchDevice) {
+        if (isInFireButton(p.canvasX, p.canvasY)) {
+          dragFireActive = true;
+          continue; // dedicated fire finger - doesn't also drive steering
+        }
+      }
+
+      const dx = p.x - p.startX;
+      const dy = p.y - p.startY;
+
+      if (Math.abs(dx) > DRAG_DEADZONE) {
+        const magnitude = clamp01((Math.abs(dx) - DRAG_DEADZONE) / (DRAG_TURN_RANGE - DRAG_DEADZONE));
+        const signed = magnitude * Math.sign(dx);
+        if (Math.abs(signed) > Math.abs(dragTurnInput)) dragTurnInput = signed;
+      }
+      if (dy < -DRAG_DEADZONE) {
+        const upDist = -dy;
+        const magnitude = clamp01((upDist - DRAG_DEADZONE) / (DRAG_THRUST_RANGE - DRAG_DEADZONE));
+        if (magnitude > dragThrustInput) dragThrustInput = magnitude;
+      }
+      if (!USE_FIRE_BUTTON && dy > DRAG_FIRE_THRESHOLD) dragFireActive = true;
+    }
+  }
+
+  // Static guess (device capability) as a sensible default before any real
+  // input is observed; refined below by actual pointerType as the player
+  // interacts, since capability alone is unreliable on hybrid devices
+  // (e.g. a touchscreen laptop driven by mouse would still report as
+  // touch-capable).
+  let isTouchDevice = window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0;
+
+  canvas.addEventListener('pointerdown', (e) => {
+    if (e.pointerType === 'touch') isTouchDevice = true;
+    else if (e.pointerType === 'mouse') isTouchDevice = false;
+    if (state === 'shop') {
+      const p = canvasSpaceXY(e);
+      handleShopClick(p.x, p.y);
+      return;
+    }
+    if (state !== 'playing' && state !== 'approaching') return;
+    canvas.setPointerCapture(e.pointerId);
+    const pos = canvasLocalXY(e);
+    const cxy = canvasSpaceXY(e);
+    dragPointers.set(e.pointerId, { startX: pos.x, startY: pos.y, x: pos.x, y: pos.y, canvasX: cxy.x, canvasY: cxy.y });
+    recomputeDragInputs();
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    const p = dragPointers.get(e.pointerId);
+    if (!p) return;
+    const pos = canvasLocalXY(e);
+    const cxy = canvasSpaceXY(e);
+    p.x = pos.x;
+    p.y = pos.y;
+    p.canvasX = cxy.x;
+    p.canvasY = cxy.y;
+    recomputeDragInputs();
+  });
+  function releaseDragPointer(e) {
+    dragPointers.delete(e.pointerId);
+    recomputeDragInputs();
+  }
+  canvas.addEventListener('pointerup', releaseDragPointer);
+  canvas.addEventListener('pointercancel', releaseDragPointer);
+  canvas.addEventListener('pointerleave', releaseDragPointer);
+
+  // ---------- Update ----------
+  // Base cooldowns in frames (60fps): normal fire is now deliberately slow,
+  // so Fire Rate upgrades and the Rapid Fire buff both feel like a real,
+  // noticeable change rather than a marginal tweak.
+  const SHIP_BASE_COOLDOWN = 18;
+  const SHIP_RAPID_COOLDOWN = 3;
+
+  function fireBullet() {
+    const spreadActive = activeBuff && activeBuff.type === 'spread';
+    const rapidActive = activeBuff && activeBuff.type === 'rapid';
+    const bulletsPerShot = spreadActive ? 3 : 1;
+    const baseCooldown = rapidActive ? SHIP_RAPID_COOLDOWN : SHIP_BASE_COOLDOWN;
+    const effectiveCooldown = Math.max(1, Math.round(baseCooldown * fireRateMultiplier()));
+    const bulletLife = 60;
+    // Steady-state bullet count at the CURRENT fire rate, plus headroom, so
+    // the cap never binds during normal sustained fire (previously a flat
+    // number that could exactly match, or fall below, the steady-state
+    // count once Fire Rate upgrades sped things up further).
+    const steadyState = Math.ceil((bulletLife / effectiveCooldown) * bulletsPerShot);
+    const maxBullets = steadyState + 10;
+    if (bullets.length >= maxBullets) return;
+
+    const buffed = !!activeBuff;
+    const angles = spreadActive ? [-0.22, 0, 0.22] : [0];
+    for (const offset of angles) {
+      const a = ship.angle + offset;
+      const tipX = ship.x + Math.cos(a) * ship.r;
+      const tipY = ship.y + Math.sin(a) * ship.r;
+      bullets.push({
+        x: tipX, y: tipY,
+        vx: Math.cos(a) * 8 + ship.vx,
+        vy: Math.sin(a) * 8 + ship.vy,
+        life: bulletLife,
+        buffed: buffed
+      });
+    }
+    sfx.fire();
+  }
+
+  function killShip() {
+    sfx.explodeShip();
+    spawnDebris(ship.x, ship.y, 40);
+    lives--;
+    updateHud();
+    if (thrustSoundOn) { setThrustSound(false); thrustSoundOn = false; }
+    if (lives <= 0) {
+      state = 'gameover';
+      stateTimer = 0;
+    } else {
+      ship = newShip();
+    }
+  }
+
+  function updateShip() {
+    let keyboardTurn = 0;
+    if (keys['ArrowLeft']) keyboardTurn -= 1;
+    if (keys['ArrowRight']) keyboardTurn += 1;
+    const turnInput = Math.abs(keyboardTurn) >= Math.abs(dragTurnInput) ? keyboardTurn : dragTurnInput;
+    ship.angle += turnInput * 0.06;
+
+    const keyboardThrust = keys['ArrowUp'] ? 1 : 0;
+    const thrustInput = Math.max(keyboardThrust, dragThrustInput);
+    ship.thrusting = thrustInput > 0;
+
+    if (ship.thrusting && !thrustSoundOn) {
+      setThrustSound(true);
+      thrustSoundOn = true;
+    } else if (!ship.thrusting && thrustSoundOn) {
+      setThrustSound(false);
+      thrustSoundOn = false;
+    }
+
+    if (ship.thrusting) {
+      const thrustAccel = 0.12 * thrustMultiplier();
+      ship.vx += Math.cos(ship.angle) * thrustAccel * thrustInput;
+      ship.vy += Math.sin(ship.angle) * thrustAccel * thrustInput;
+
+      // emit glowing exhaust particles from the engine, spread in a small cone
+      const backX = ship.x - Math.cos(ship.angle) * ship.r * 0.6;
+      const backY = ship.y - Math.sin(ship.angle) * ship.r * 0.6;
+      for (let i = 0; i < 2; i++) {
+        const spread = rand(-0.12, 0.12);
+        const emitAngle = ship.angle + Math.PI + spread;
+        const speed = rand(0.8, 1.6) * thrustInput;
+        trail.push({
+          x: backX, y: backY,
+          vx: Math.cos(emitAngle) * speed + ship.vx * 0.4,
+          vy: Math.sin(emitAngle) * speed + ship.vy * 0.4,
+          life: rand(45, 70),
+          maxLife: 70,
+          size: rand(1.5, 3)
+        });
+      }
+    }
+    ship.vx *= 0.99;
+    ship.vy *= 0.99;
+
+    const speed = Math.sqrt(ship.vx*ship.vx + ship.vy*ship.vy);
+    const maxSpeed = maxSpeedValue();
+    if (speed > maxSpeed) {
+      ship.vx = ship.vx / speed * maxSpeed;
+      ship.vy = ship.vy / speed * maxSpeed;
+    }
+
+    ship.x += ship.vx;
+    ship.y += ship.vy;
+    wrap(ship);
+
+    if (ship.shootCooldown > 0) ship.shootCooldown--;
+    if ((keys['Space'] || dragFireActive) && ship.shootCooldown <= 0) {
+      fireBullet();
+      const baseCooldown = (activeBuff && activeBuff.type === 'rapid') ? SHIP_RAPID_COOLDOWN : SHIP_BASE_COOLDOWN;
+      const fireRateMult = fireRateMultiplier();
+      ship.shootCooldown = Math.max(1, Math.round(baseCooldown * fireRateMult));
+      totalShotsFired++;
+      if (upgradeIsOwned('homing') && totalShotsFired % HOMING_MISSILE_EVERY_T1 === 0) {
+        launchHomingMissile();
+      }
+      if (upgradeIsOwned('homing2') && totalShotsFired % HOMING_MISSILE_EVERY_T2 === 0) {
+        launchHomingMissile();
+      }
+      if (upgradeIsOwned('homing3') && totalShotsFired % HOMING_MISSILE_EVERY_T3 === 0) {
+        launchHomingMissile();
+      }
+    }
+
+    if (ship.hyperCooldown > 0) ship.hyperCooldown--;
+    if (keys['ShiftLeft'] || keys['ShiftRight']) {
+      if (ship.hyperCooldown <= 0) {
+        sfx.hyperspace();
+        ship.x = rand(0, W);
+        ship.y = rand(0, H);
+        ship.vx = 0; ship.vy = 0;
+        ship.hyperCooldown = 60;
+        ship.invincible = 60;
+      }
+    }
+
+    if (ship.invincible > 0) {
+      ship.invincible--;
+      ship.blinkOn = Math.floor(ship.invincible / 6) % 2 === 0;
+    } else {
+      ship.blinkOn = true;
+    }
+  }
+
+  function updateBullets(arr) {
+    for (let i = arr.length - 1; i >= 0; i--) {
+      const b = arr[i];
+      b.x += b.vx; b.y += b.vy;
+      if (b.fadeOut !== undefined) {
+        b.fadeOut--;
+        if (b.fadeOut <= 0) { arr.splice(i, 1); continue; }
+        continue;
+      }
+      b.life--;
+      if (b.life <= 0) { arr.splice(i, 1); continue; }
+      if (b.x < 0 || b.x > W || b.y < 0 || b.y > H) { arr.splice(i, 1); }
+    }
+  }
+
+  function updateAsteroids() {
+    for (const a of asteroids) {
+      a.x += a.vx; a.y += a.vy;
+      a.angle += a.spin;
+      a.spawnTimer++;
+      wrap(a);
+    }
+  }
+
+  function updateParticles() {
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      p.x += p.vx; p.y += p.vy;
+      p.vx *= 0.96; p.vy *= 0.96;
+      p.life--;
+      wrap(p);
+      if (p.life <= 0) particles.splice(i, 1);
+    }
+  }
+
+  function collectDust() {
+    dustCollected++;
+    sfx.collect();
+    if (dustCollected >= DUST_THRESHOLD) {
+      dustCollected = 0;
+      triggerBuff();
+    }
+  }
+
+  function pickRandomBuffType() {
+    return BUFF_TYPES[Math.floor(rand(0, BUFF_TYPES.length))];
+  }
+
+  function triggerBuff() {
+    if (!nextBuffType) nextBuffType = pickRandomBuffType();
+    activeBuff = { type: nextBuffType, timer: Math.round(BUFF_DURATION * buffDurationMultiplier()) };
+    sfx.buffUp();
+    nextBuffType = pickRandomBuffType();
+  }
+
+  // ---------- Pickups ----------
+  // A rare bonus drop from destroyed asteroids/saucers: a chunky yellow
+  // square, like a pong ball, distinct from the cyan dust particles.
+  // Collecting one adds to the persistent currency, not score.
+  const PICKUP_SPAWN_CHANCE = 0.08;
+  const PICKUP_SIZE = 9;
+  const PICKUP_LIFE = 360; // ~6 seconds before it despawns if uncollected
+  const PICKUP_CURRENCY_VALUE_BASE = 10;
+  const PICKUP_MAGNET_RADIUS = 130;
+  const PICKUP_COLOR = '255,225,60';
+
+  function maybeSpawnPickup(x, y) {
+    if (Math.random() >= PICKUP_SPAWN_CHANCE) return;
+    const angle = rand(0, TWO_PI);
+    const speed = rand(0.3, 1);
+    pickups.push({
+      x, y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      r: PICKUP_SIZE / 2,
+      life: PICKUP_LIFE
+    });
+  }
+
+  function updatePickups() {
+    for (let i = pickups.length - 1; i >= 0; i--) {
+      const p = pickups[i];
+
+      if (ship) {
+        const dx = ship.x - p.x, dy = ship.y - p.y;
+        const distance = Math.sqrt(dx*dx + dy*dy) || 0.01;
+        const effectiveRadius = PICKUP_MAGNET_RADIUS * magnetRadiusMultiplier();
+        if (distance < effectiveRadius) {
+          const pull = 0.5 * (1 - distance / effectiveRadius);
+          p.vx += (dx / distance) * pull;
+          p.vy += (dy / distance) * pull;
+        }
+      }
+
+      p.x += p.vx;
+      p.y += p.vy;
+      p.life--;
+      wrap(p);
+      if (p.life <= 0) {
+        pickups.splice(i, 1);
+        continue;
+      }
+      if (ship && dist(ship, p) < ship.r + p.r) {
+        pickups.splice(i, 1);
+        currency += pickupValue();
+        sfx.pickup();
+        spawnDebris(p.x, p.y, 10);
+      }
+    }
+  }
+
+  // ---------- Upgrade shop ----------
+  // Stackable upgrades can be bought again on a LATER visit (cost rises each
+  // level), but only once per single visit. One-time upgrades (unlocks) can
+  // only ever be bought once, period.
+  const UPGRADES = [
+    { id: 'firerate', name: 'FIRE RATE', type: 'stackable',
+      baseCost: 60, costGrowth: 1.35, maxLevel: 8, level: 0, purchasedThisVisit: false,
+      icon: drawIconFireRate, describe: (u) => '+' + Math.round((1 - Math.pow(0.9, u.level)) * 100) + '% (LV ' + u.level + ')' },
+    { id: 'extralife', name: 'EXTRA LIFE', type: 'stackable',
+      baseCost: 90, costGrowth: 1.25, maxLevel: 20, level: 0, purchasedThisVisit: false,
+      icon: drawIconExtraLife, describe: () => '+1 LIFE' },
+    { id: 'thrustpower', name: 'THRUST POWER', type: 'stackable',
+      baseCost: 50, costGrowth: 1.3, maxLevel: 8, level: 0, purchasedThisVisit: false,
+      icon: drawIconThrust, describe: (u) => '+' + Math.round((Math.pow(1.15, u.level) - 1) * 100) + '% ACCEL' },
+    { id: 'maxspeed', name: 'MAX SPEED', type: 'stackable',
+      baseCost: 55, costGrowth: 1.3, maxLevel: 8, level: 0, purchasedThisVisit: false,
+      icon: drawIconMaxSpeed, describe: (u) => '+' + Math.round((Math.pow(1.1, u.level) - 1) * 100) + '% TOP SPEED' },
+    { id: 'buffduration', name: 'BUFF DURATION', type: 'stackable',
+      baseCost: 70, costGrowth: 1.3, maxLevel: 6, level: 0, purchasedThisVisit: false,
+      icon: drawIconBuffDuration, describe: (u) => '+' + Math.round((Math.pow(1.2, u.level) - 1) * 100) + '% LENGTH' },
+    { id: 'magnetrange', name: 'DUST MAGNET', type: 'stackable',
+      baseCost: 45, costGrowth: 1.3, maxLevel: 8, level: 0, purchasedThisVisit: false,
+      icon: drawIconMagnet, describe: (u) => '+' + Math.round((Math.pow(1.15, u.level) - 1) * 100) + '% RANGE' },
+    { id: 'dustvalue', name: 'DUST VALUE', type: 'stackable',
+      baseCost: 65, costGrowth: 1.3, maxLevel: 8, level: 0, purchasedThisVisit: false,
+      icon: drawIconDustValue, describe: (u) => '+' + (2 * u.level) + ' PER PIXEL' },
+    { id: 'homing', name: 'HOMING MISSILE', type: 'onetime',
+      cost: 150, owned: false, icon: drawIconMissile, describe: () => 'EVERY 20 SHOTS' },
+    { id: 'homing2', name: 'HOMING MISSILE II', type: 'onetime', requires: 'homing',
+      cost: 220, owned: false, icon: drawIconMissile, describe: () => 'ALSO EVERY 15 SHOTS' },
+    { id: 'homing3', name: 'HOMING MISSILE III', type: 'onetime', requires: 'homing2',
+      cost: 320, owned: false, icon: drawIconMissile, describe: () => 'ALSO EVERY 7 SHOTS' },
+    { id: 'drone', name: 'DRONE', type: 'onetime',
+      cost: 180, owned: false, icon: drawIconDrone, describe: () => '1 DRONE, 1/4 RATE' },
+    { id: 'drone2', name: 'DRONE II', type: 'onetime', requires: 'drone',
+      cost: 250, owned: false, icon: drawIconDrone, describe: () => '2 DRONES, 1/3 RATE' },
+    { id: 'drone3', name: 'DRONE III', type: 'onetime', requires: 'drone2',
+      cost: 350, owned: false, icon: drawIconDrone, describe: () => '3 DRONES, 1/2 RATE' }
+  ];
+
+  function findUpgrade(id) { return UPGRADES.find(u => u.id === id); }
+  function upgradeLevel(id) { const u = findUpgrade(id); return u ? (u.level || 0) : 0; }
+  function upgradeIsOwned(id) { const u = findUpgrade(id); return u ? !!u.owned : false; }
+
+  // ---------- Upgrade effect getters (used throughout gameplay) ----------
+  function fireRateMultiplier() { return Math.pow(0.9, upgradeLevel('firerate')); }
+  function thrustMultiplier() { return Math.pow(1.15, upgradeLevel('thrustpower')); }
+  function maxSpeedValue() { return 7 * Math.pow(1.1, upgradeLevel('maxspeed')); }
+  function buffDurationMultiplier() { return Math.pow(1.2, upgradeLevel('buffduration')); }
+  function magnetRadiusMultiplier() { return Math.pow(1.15, upgradeLevel('magnetrange')); }
+  function pickupValue() { return PICKUP_CURRENCY_VALUE_BASE + 2 * upgradeLevel('dustvalue'); }
+  function droneCount() {
+    if (upgradeIsOwned('drone3')) return 3;
+    if (upgradeIsOwned('drone2')) return 2;
+    if (upgradeIsOwned('drone')) return 1;
+    return 0;
+  }
+  function droneFireRatio() {
+    if (upgradeIsOwned('drone3')) return 2;
+    if (upgradeIsOwned('drone2')) return 3;
+    return 4;
+  }
+
+  function upgradeOwned(u) {
+    return u.type === 'onetime' ? u.owned : u.purchasedThisVisit;
+  }
+  function upgradeCost(u) {
+    if (u.type === 'onetime') {
+      if (u.owned) return null;
+      if (u.requires && !upgradeIsOwned(u.requires)) return null; // locked behind prerequisite
+      return u.cost;
+    }
+    if (u.purchasedThisVisit) return null;
+    if (u.level >= u.maxLevel) return null;
+    return Math.round(u.baseCost * Math.pow(u.costGrowth, u.level));
+  }
+  function purchaseUpgrade(u) {
+    const cost = upgradeCost(u);
+    if (cost === null) return;
+    if (currency < cost) {
+      stationShopMessage = 'NOT ENOUGH CURRENCY';
+      stationShopMessageTimer = 90;
+      return;
+    }
+    currency -= cost;
+    if (u.type === 'onetime') {
+      u.owned = true;
+    } else {
+      u.level++;
+      u.purchasedThisVisit = true;
+      if (u.id === 'extralife') lives++;
+    }
+    stationShopMessage = u.name + ' PURCHASED';
+    stationShopMessageTimer = 90;
+    sfx.buffUp();
+  }
+  function resetShopVisitLimits() {
+    for (const u of UPGRADES) {
+      if (u.type === 'stackable') u.purchasedThisVisit = false;
+    }
+  }
+
+  function drawIconFireRate(cx, cy, s) {
+    ctx.beginPath();
+    ctx.moveTo(cx - s*0.32, cy + s*0.32); ctx.lineTo(cx - s*0.32, cy - s*0.05);
+    ctx.moveTo(cx,          cy + s*0.32); ctx.lineTo(cx,          cy - s*0.22);
+    ctx.moveTo(cx + s*0.32, cy + s*0.32); ctx.lineTo(cx + s*0.32, cy - s*0.4);
+    ctx.stroke();
+  }
+  function drawIconExtraLife(cx, cy, s) {
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(-Math.PI/2);
+    ctx.beginPath();
+    ctx.moveTo(s*0.42, 0);
+    ctx.lineTo(-s*0.30, s*0.26);
+    ctx.lineTo(-s*0.16, 0);
+    ctx.lineTo(-s*0.30, -s*0.26);
+    ctx.closePath();
+    ctx.stroke();
+    ctx.restore();
+  }
+  function drawIconMissile(cx, cy, s) {
+    ctx.beginPath();
+    ctx.arc(cx, cy, s*0.32, 0, TWO_PI);
+    ctx.moveTo(cx - s*0.5, cy); ctx.lineTo(cx - s*0.32, cy);
+    ctx.moveTo(cx + s*0.32, cy); ctx.lineTo(cx + s*0.5, cy);
+    ctx.moveTo(cx, cy - s*0.5); ctx.lineTo(cx, cy - s*0.32);
+    ctx.moveTo(cx, cy + s*0.32); ctx.lineTo(cx, cy + s*0.5);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(cx, cy, s*0.05, 0, TWO_PI);
+    ctx.fill();
+  }
+  function drawIconDrone(cx, cy, s) {
+    ctx.beginPath();
+    ctx.arc(cx, cy, s*0.07, 0, TWO_PI);
+    ctx.fill();
+    ctx.save();
+    ctx.setLineDash([s*0.06, s*0.06]);
+    ctx.beginPath();
+    ctx.arc(cx, cy, s*0.4, 0, TWO_PI);
+    ctx.stroke();
+    ctx.restore();
+    ctx.beginPath();
+    ctx.arc(cx + s*0.4, cy, s*0.08, 0, TWO_PI);
+    ctx.fill();
+  }
+  function drawIconThrust(cx, cy, s) {
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - s*0.4);
+    ctx.lineTo(cx - s*0.25, cy + s*0.1);
+    ctx.lineTo(cx + s*0.25, cy + s*0.1);
+    ctx.closePath();
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(cx - s*0.12, cy + s*0.1); ctx.lineTo(cx - s*0.12, cy + s*0.35);
+    ctx.moveTo(cx + s*0.12, cy + s*0.1); ctx.lineTo(cx + s*0.12, cy + s*0.4);
+    ctx.stroke();
+  }
+  function drawIconMaxSpeed(cx, cy, s) {
+    ctx.beginPath();
+    ctx.moveTo(cx - s*0.35, cy - s*0.3); ctx.lineTo(cx - s*0.05, cy); ctx.lineTo(cx - s*0.35, cy + s*0.3);
+    ctx.moveTo(cx + s*0.05, cy - s*0.3); ctx.lineTo(cx + s*0.35, cy); ctx.lineTo(cx + s*0.05, cy + s*0.3);
+    ctx.stroke();
+  }
+  function drawIconBuffDuration(cx, cy, s) {
+    ctx.beginPath();
+    ctx.moveTo(cx - s*0.3, cy - s*0.4);
+    ctx.lineTo(cx + s*0.3, cy - s*0.4);
+    ctx.lineTo(cx, cy);
+    ctx.lineTo(cx + s*0.3, cy + s*0.4);
+    ctx.lineTo(cx - s*0.3, cy + s*0.4);
+    ctx.lineTo(cx, cy);
+    ctx.closePath();
+    ctx.stroke();
+  }
+  function drawIconMagnet(cx, cy, s) {
+    const r = s*0.28;
+    const a1 = Math.PI*0.15, a2 = Math.PI*0.85;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, a1, a2, false);
+    ctx.stroke();
+    const x1 = cx + Math.cos(a1)*r, y1 = cy + Math.sin(a1)*r;
+    const x2 = cx + Math.cos(a2)*r, y2 = cy + Math.sin(a2)*r;
+    ctx.beginPath();
+    ctx.moveTo(x1, y1); ctx.lineTo(x1, y1 - s*0.32);
+    ctx.moveTo(x2, y2); ctx.lineTo(x2, y2 - s*0.32);
+    ctx.stroke();
+  }
+  function drawIconDustValue(cx, cy, s) {
+    ctx.strokeRect(cx - s*0.4 - s*0.1, cy - s*0.25, s*0.5, s*0.5);
+    ctx.beginPath();
+    ctx.moveTo(cx + s*0.12, cy - s*0.4); ctx.lineTo(cx + s*0.44, cy - s*0.4);
+    ctx.moveTo(cx + s*0.28, cy - s*0.56); ctx.lineTo(cx + s*0.28, cy - s*0.24);
+    ctx.stroke();
+  }
+
+  // ---------- Homing missile (upgrade) ----------
+  const HOMING_MISSILE_EVERY_T1 = 20;
+  const HOMING_MISSILE_EVERY_T2 = 15;
+  const HOMING_MISSILE_EVERY_T3 = 7;
+  const HOMING_MISSILE_TURN_RATE = 0.06;
+  const HOMING_MISSILE_SPEED = 6;
+  const HOMING_MISSILE_LIFE = 240;
+  let totalShotsFired = 0;
+  let missiles = [];
+
+  function normalizeAngleDiff(a) {
+    while (a > Math.PI) a -= TWO_PI;
+    while (a < -Math.PI) a += TWO_PI;
+    return a;
+  }
+
+  function pickMissileTarget() {
+    const candidates = asteroids.slice();
+    if (saucer) candidates.push(saucer);
+    if (candidates.length === 0) return null;
+    return candidates[Math.floor(rand(0, candidates.length))];
+  }
+
+  function launchHomingMissile() {
+    const target = pickMissileTarget();
+    if (!target) return;
+    missiles.push({
+      x: ship.x, y: ship.y,
+      angle: ship.angle,
+      target,
+      life: HOMING_MISSILE_LIFE,
+      trail: [],
+      r: 4
+    });
+  }
+
+  function updateMissiles() {
+    for (let i = missiles.length - 1; i >= 0; i--) {
+      const m = missiles[i];
+      m.life--;
+      const targetGone = !m.target || (asteroids.indexOf(m.target) === -1 && m.target !== saucer);
+      if (targetGone) {
+        m.target = pickMissileTarget();
+      }
+      if (m.life <= 0 || !m.target) { missiles.splice(i, 1); continue; }
+
+      const desiredAngle = Math.atan2(m.target.y - m.y, m.target.x - m.x);
+      const diff = normalizeAngleDiff(desiredAngle - m.angle);
+      m.angle += Math.max(-HOMING_MISSILE_TURN_RATE, Math.min(HOMING_MISSILE_TURN_RATE, diff));
+
+      m.trail.push({ x: m.x, y: m.y });
+      if (m.trail.length > 12) m.trail.shift();
+
+      m.x += Math.cos(m.angle) * HOMING_MISSILE_SPEED;
+      m.y += Math.sin(m.angle) * HOMING_MISSILE_SPEED;
+      wrap(m);
+
+      for (const a of asteroids) {
+        if (dist(m, a) < a.r) {
+          missiles.splice(i, 1);
+          breakAsteroid(a);
+          break;
+        }
+      }
+      if (missiles[i] !== m) continue; // consumed above
+      if (saucer && dist(m, saucer) < saucer.r) {
+        missiles.splice(i, 1);
+        score += saucer.large ? 200 : 1000;
+        updateHud();
+        checkExtraLife();
+        spawnDebris(saucer.x, saucer.y, 50);
+        maybeSpawnPickup(saucer.x, saucer.y);
+        sfx.bangMedium();
+        saucer = null;
+        checkLevelComplete();
+      }
+    }
+  }
+
+  function drawMissiles() {
+    for (const m of missiles) {
+      for (let i = 0; i < m.trail.length; i++) {
+        const t = m.trail[i];
+        const a = i / m.trail.length;
+        ctx.fillStyle = 'rgba(255,150,60,' + (a*0.5).toFixed(2) + ')';
+        ctx.fillRect(t.x-1.5, t.y-1.5, 3, 3);
+      }
+      ctx.save();
+      ctx.translate(m.x, m.y);
+      ctx.rotate(m.angle);
+      ctx.strokeStyle = 'rgb(255,150,60)';
+      ctx.shadowColor = 'rgb(255,150,60)';
+      ctx.shadowBlur = 6 * GLOW_SCALE;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(7, 0);
+      ctx.lineTo(-5, 3.5);
+      ctx.lineTo(-5, -3.5);
+      ctx.closePath();
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  // ---------- Drone (upgrade) ----------
+  const DRONE_ORBIT_RADIUS = 70;
+  const DRONE_ORBIT_SPEED = 0.020;
+  let droneBaseAngle = 0;
+  let droneCooldowns = [0, 0, 0];
+
+  function updateDrones() {
+    const count = droneCount();
+    if (count === 0 || !ship) return;
+    droneBaseAngle += DRONE_ORBIT_SPEED;
+    const ratio = droneFireRatio();
+    for (let i = 0; i < count; i++) {
+      const angle = droneBaseAngle + (TWO_PI / count) * i;
+      const x = ship.x + Math.cos(angle) * DRONE_ORBIT_RADIUS;
+      const y = ship.y + Math.sin(angle) * DRONE_ORBIT_RADIUS;
+
+      if (droneCooldowns[i] > 0) droneCooldowns[i]--;
+      if (droneCooldowns[i] <= 0) {
+        const fireRateMult = fireRateMultiplier();
+        const baseCooldown = (activeBuff && activeBuff.type === 'rapid') ? SHIP_RAPID_COOLDOWN : SHIP_BASE_COOLDOWN;
+        droneCooldowns[i] = Math.max(1, Math.round(baseCooldown * fireRateMult)) * ratio;
+        bullets.push({
+          x, y,
+          vx: Math.cos(angle) * 8, vy: Math.sin(angle) * 8,
+          life: 60, buffed: false, fromDrone: true
+        });
+      }
+    }
+  }
+
+  function drawDrones() {
+    const count = droneCount();
+    if (count === 0 || !ship) return;
+    for (let i = 0; i < count; i++) {
+      const angle = droneBaseAngle + (TWO_PI / count) * i;
+      const x = ship.x + Math.cos(angle) * DRONE_ORBIT_RADIUS;
+      const y = ship.y + Math.sin(angle) * DRONE_ORBIT_RADIUS;
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.strokeStyle = 'rgb(150,235,255)';
+      ctx.shadowColor = 'rgb(150,235,255)';
+      ctx.shadowBlur = 6 * GLOW_SCALE;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(0, 0, 6, 0, TWO_PI);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+
+  function drawPickups() {
+    for (const p of pickups) {
+      const blink = p.life < 90 ? (Math.floor(p.life / 6) % 2 === 0) : true;
+      if (!blink) continue;
+      ctx.save();
+      ctx.fillStyle = 'rgb(' + PICKUP_COLOR + ')';
+      ctx.shadowColor = 'rgb(' + PICKUP_COLOR + ')';
+      ctx.shadowBlur = 8 * GLOW_SCALE;
+      ctx.fillRect(Math.round(p.x - PICKUP_SIZE/2), Math.round(p.y - PICKUP_SIZE/2), PICKUP_SIZE, PICKUP_SIZE);
+      ctx.restore();
+    }
+  }
+
+  function resolveDustInteractions() {
+    if (particles.length === 0) return;
+
+    const shipSpeed = ship ? Math.sqrt(ship.vx*ship.vx + ship.vy*ship.vy) : 0;
+    const magnetActive = state === 'playing' && ship && shipSpeed < MAGNET_SPEED_THRESHOLD;
+
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+
+      if (state === 'playing' && ship) {
+        const dx = ship.x - p.x;
+        const dy = ship.y - p.y;
+        const distSq = dx*dx + dy*dy;
+        const distance = Math.sqrt(distSq) || 0.01;
+        const effectiveMagnetRadius = MAGNET_RADIUS * magnetRadiusMultiplier();
+
+        if (magnetActive && distance < effectiveMagnetRadius) {
+          // slow ship: dust gets pulled in, stronger the closer it is
+          const pull = 0.4 * (1 - distance / effectiveMagnetRadius);
+          p.vx += (dx / distance) * pull;
+          p.vy += (dy / distance) * pull;
+
+          if (distance < ship.r * 0.9) {
+            particles.splice(i, 1);
+            collectDust();
+            continue;
+          }
+        } else {
+          // fast ship (or out of magnet range): just physically shove it aside
+          const minDist = ship.r + p.r;
+          if (distSq < minDist*minDist) {
+            const nx = -dx / distance, ny = -dy / distance;
+            const overlap = minDist - distance;
+            p.x += nx * overlap;
+            p.y += ny * overlap;
+            p.vx += nx * 1.2 + ship.vx * 0.5;
+            p.vy += ny * 1.2 + ship.vy * 0.5;
+          }
+        }
+      }
+
+      // asteroids always just physically push dust out of the way
+      for (const a of asteroids) {
+        const adx = p.x - a.x, ady = p.y - a.y;
+        const minDist = a.r + p.r;
+        const distSq2 = adx*adx + ady*ady;
+        if (distSq2 < minDist*minDist) {
+          const distance2 = Math.sqrt(distSq2) || 0.01;
+          const nx = adx / distance2, ny = ady / distance2;
+          const overlap = minDist - distance2;
+          p.x += nx * overlap;
+          p.y += ny * overlap;
+          p.vx += nx * 1.2 + a.vx * 0.5;
+          p.vy += ny * 1.2 + a.vy * 0.5;
+        }
+      }
+    }
+  }
+
+  function updateTrail() {
+    for (let i = trail.length - 1; i >= 0; i--) {
+      const p = trail[i];
+      p.x += p.vx; p.y += p.vy;
+      p.vx *= 0.985; p.vy *= 0.985;
+      p.life--;
+      if (p.life <= 0) trail.splice(i, 1);
+    }
+  }
+
+  function checkCollisions() {
+    // bullets vs asteroids
+    for (let i = bullets.length - 1; i >= 0; i--) {
+      const b = bullets[i];
+      for (let j = asteroids.length - 1; j >= 0; j--) {
+        const a = asteroids[j];
+        if (dist(b, a) < a.r) {
+          bullets.splice(i, 1);
+          breakAsteroid(a);
+          break;
+        }
+      }
+    }
+    // bullets vs saucer
+    if (saucer) {
+      for (let i = bullets.length - 1; i >= 0; i--) {
+        const b = bullets[i];
+        if (dist(b, saucer) < saucer.r) {
+          bullets.splice(i, 1);
+          score += saucer.large ? 200 : 1000;
+          updateHud();
+          checkExtraLife();
+          spawnDebris(saucer.x, saucer.y, 50);
+          maybeSpawnPickup(saucer.x, saucer.y);
+          sfx.bangMedium();
+          saucer = null;
+          checkLevelComplete();
+          break;
+        }
+      }
+    }
+    // ship vs asteroids
+    const spawnInvincible = ship.invincible > 0;
+    const shieldBuffActive = !!(activeBuff && activeBuff.type === 'shield');
+    const immune = spawnInvincible || shieldBuffActive;
+
+    if (shieldBuffActive) {
+      const shieldRadius = ship.r * SHIELD_RADIUS_MULT;
+      for (let j = asteroids.length - 1; j >= 0; j--) {
+        const a = asteroids[j];
+        if (dist(ship, a) < a.r + shieldRadius) {
+          breakAsteroid(a);
+        }
+      }
+      if (saucer && dist(ship, saucer) < saucer.r + shieldRadius) {
+        score += saucer.large ? 200 : 1000;
+        updateHud();
+        checkExtraLife();
+        spawnDebris(saucer.x, saucer.y, 50);
+        maybeSpawnPickup(saucer.x, saucer.y);
+        sfx.bangMedium();
+        saucer = null;
+        checkLevelComplete();
+      }
+    }
+
+    if (!immune) {
+      for (const a of asteroids) {
+        if (dist(ship, a) < a.r + ship.r * 0.6) {
+          killShip();
+          break;
+        }
+      }
+      if (saucer && dist(ship, saucer) < saucer.r + ship.r * 0.6) {
+        killShip();
+      }
+      for (let i = saucerBullets.length - 1; i >= 0; i--) {
+        const b = saucerBullets[i];
+        if (dist(ship, b) < ship.r) {
+          saucerBullets.splice(i, 1);
+          killShip();
+          break;
+        }
+      }
+    }
+  }
+
+  // ---------- Draw ----------
+  function drawShip() {
+    if (!ship.blinkOn) return;
+    const shipAlpha = state === 'docked' ? (1 - stationDockFadeT) : (state === 'shop' ? 0 : 1);
+    if (shipAlpha <= 0.01) return;
+    ctx.save();
+    ctx.globalAlpha = shipAlpha;
+    ctx.translate(ship.x, ship.y);
+
+    if (activeBuff && activeBuff.type === 'shield') {
+      const pulse = 0.7 + 0.3 * Math.sin(Date.now() / 120);
+      ctx.save();
+      ctx.strokeStyle = 'rgba(150,235,255,' + pulse + ')';
+      ctx.lineWidth = 2;
+      ctx.shadowColor = 'rgba(150,235,255,1)';
+      ctx.shadowBlur = 10 * GLOW_SCALE;
+      ctx.beginPath();
+      ctx.arc(0, 0, ship.r * SHIELD_RADIUS_MULT, 0, TWO_PI);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    ctx.rotate(ship.angle);
+    ctx.scale(ship.scale, ship.scale);
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 2 / ship.scale;
+    ctx.shadowColor = '#fff';
+    ctx.shadowBlur = 8 * GLOW_SCALE;
+    ctx.beginPath();
+    ctx.moveTo(ship.r, 0);
+    ctx.lineTo(-ship.r*0.7, ship.r*0.6);
+    ctx.lineTo(-ship.r*0.4, 0);
+    ctx.lineTo(-ship.r*0.7, -ship.r*0.6);
+    ctx.closePath();
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawAsteroid(a) {
+    ctx.save();
+    ctx.translate(a.x, a.y);
+    ctx.rotate(a.angle);
+    ctx.globalAlpha = Math.min(1, a.spawnTimer / ASTEROID_FADE_IN_FRAMES);
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 2;
+    ctx.shadowColor = '#fff';
+    ctx.shadowBlur = 6 * GLOW_SCALE;
+    ctx.beginPath();
+    const n = a.verts.length;
+    for (let i = 0; i < n; i++) {
+      const ang = (i / n) * TWO_PI;
+      const rr = a.r * a.verts[i];
+      const px = Math.cos(ang) * rr;
+      const py = Math.sin(ang) * rr;
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  const BULLET_FADE_FRAMES = 12;
+
+  function drawBullets(arr, colorTriplet) {
+    colorTriplet = colorTriplet || '255,255,255';
+    ctx.save();
+    ctx.shadowBlur = 6 * GLOW_SCALE;
+    for (const b of arr) {
+      const triplet = (b.buffed || b.fromDrone) ? '150,235,255' : colorTriplet;
+      const alpha = b.fadeOut !== undefined ? Math.max(0, b.fadeOut / BULLET_FADE_FRAMES) : 1;
+      const style = 'rgba(' + triplet + ',' + alpha.toFixed(3) + ')';
+      ctx.fillStyle = style;
+      ctx.shadowColor = style;
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, 2, 0, TWO_PI);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawTrail() {
+    if (trail.length === 0) return;
+    for (const p of trail) {
+      const t = p.life / p.maxLife; // 1 = fresh, 0 = dying
+      const size = Math.max(1, Math.round(p.size * (0.5 + t * 0.5)));
+      ctx.fillStyle = 'rgba(255,255,255,' + t + ')';
+      // snap to whole pixels for a crisp, hard-edged retro look
+      ctx.fillRect(Math.round(p.x - size/2), Math.round(p.y - size/2), size, size);
+    }
+  }
+
+  function drawParticles() {
+    ctx.save();
+    ctx.shadowColor = 'rgba(150,230,255,0.8)';
+    ctx.shadowBlur = 4 * GLOW_SCALE;
+    for (const p of particles) {
+      const t = p.life / p.maxLife;
+      const size = Math.max(1, Math.round(p.size * (0.5 + t * 0.5)));
+      ctx.fillStyle = 'rgba(150,230,255,' + (0.35 + t * 0.65).toFixed(3) + ')';
+      ctx.fillRect(Math.round(p.x - size/2), Math.round(p.y - size/2), size, size);
+    }
+    ctx.restore();
+  }
+
+  // New saucer design (from the uploaded SVG), drawn via Path2D so the
+  // exact original path data is reused rather than hand-redrawn. Coordinates
+  // are the SVG's raw local units, pre-transform - centered and scaled at
+  // draw time to match the previous saucer's on-screen footprint.
+  const SAUCER_PATHS = [
+    "m 76.199996,110.06667 h 8.466667 l 4.233334,-1.95834 -4.233333,-2.27499 h -8.466666 l -4.233333,2.27499 z",
+    "m 76.199996,105.83333 2.116667,-1.73601 h 4.233333 l 2.116667,1.73601 z",
+    "m 77.196126,110.09995 0.539615,1.80789 h 5.395177 l 0.539615,-1.80789 z"
+  ].map(d => new Path2D(d));
+  const SAUCER_SRC_CENTER_X = 80.43;
+  const SAUCER_SRC_CENTER_Y = 108.0;
+  const SAUCER_SRC_WIDTH = 16.93; // bounding box width in the SVG's own units
+
+  function drawSaucer() {
+    if (!saucer) return;
+    const scale = (saucer.r * 2) / SAUCER_SRC_WIDTH; // match previous saucer.r-based size
+    ctx.save();
+    ctx.translate(saucer.x, saucer.y);
+    ctx.scale(scale, scale);
+    ctx.translate(-SAUCER_SRC_CENTER_X, -SAUCER_SRC_CENTER_Y);
+    ctx.strokeStyle = '#ff3b3b';
+    ctx.lineWidth = 2 / scale;
+    ctx.shadowColor = '#ff3b3b';
+    ctx.shadowBlur = 6 * GLOW_SCALE / scale;
+    for (const p of SAUCER_PATHS) ctx.stroke(p);
+    ctx.restore();
+  }
+
+  // Space station design v2 (simplified cross/plus shape with 4 landing
+  // pads, one per arm). Two overlapping rects form the cross body; four
+  // small quadrilaterals at the concave inner corners are the engines; four
+  // arrow shapes point at the pads purely as a visual cue (not used for
+  // gameplay geometry, which is derived analytically below instead).
+  const SPACE_STATION_SRC_CENTER_X = 115.7317, SPACE_STATION_SRC_CENTER_Y = 127.3619, SPACE_STATION_SRC_WIDTH = 41.6259;
+
+  // Body: vertical bar + horizontal bar (already resolved to plain rects -
+  // the horizontal one was a rotated copy of the same rect in the source).
+  const STATION_BODY_RECTS = [
+    { x: 105.3252, y: 106.54888, w: 20.81296, h: 41.625919 },   // vertical bar
+    { x: 94.918701, y: 116.95538, w: 41.62592, h: 20.81296 }    // horizontal bar (post-rotation)
+  ];
+  // Small arrow markers pointing at each pad (decorative only).
+  const SPACE_STATION_ARROW_PATHS = [
+    "m 97.452968,122.15861 5.203252,5.20323 -5.203252,5.20324 z",   // left
+    "m 120.93491,109.08317 -5.20322,5.20323 -5.20325,-5.20323 z",   // top
+    "m 134.01035,132.56508 -5.20323,-5.20322 5.20323,-5.20325 z",   // right
+    "m 110.52844,145.64052 5.20322,-5.20322 5.20325,5.20322 z"      // bottom
+  ].map(d => new Path2D(d));
+  // Small corner details at the concave inner corners (between arms).
+  const SPACE_STATION_ENGINE_PATHS = [
+    "m 100.88394,138.53033 -2.358222,3.51413 2.523342,2.52334 3.51413,-2.35822 z", // Engine1 (bottom-left)
+    "m 100.88394,116.19339 -2.358222,-3.51413 2.523342,-2.52334 3.51413,2.35822 z", // path60 (top-left)
+    "m 130.57938,138.53033 2.35825,3.51413 -2.52334,2.52334 -3.51416,-2.35822 z",   // Engine4 (bottom-right)
+    "m 130.57938,116.19339 2.35825,-3.51413 -2.52334,-2.52334 -3.51416,2.35822 z"   // path62 (top-right)
+  ].map(d => new Path2D(d));
+
+  // True relative scale, computed directly from the SVG's own units.
+  const STATION_TRUE_RATIO = SPACE_STATION_SRC_WIDTH / SAUCER_SRC_WIDTH;
+  const STATION_SCALE_MULTIPLIER = 1.0;
+
+  function drawSpaceStation(x, y, targetWidth, angle, color, alpha) {
+    color = color || '#5ac3f8';
+    alpha = alpha === undefined ? 1 : alpha;
+    const scale = targetWidth / SPACE_STATION_SRC_WIDTH;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.translate(x, y);
+    ctx.rotate(angle || 0);
+    ctx.scale(scale, scale);
+    ctx.translate(-SPACE_STATION_SRC_CENTER_X, -SPACE_STATION_SRC_CENTER_Y);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2 / scale;
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 6 * GLOW_SCALE / scale;
+
+    for (const r of STATION_BODY_RECTS) ctx.strokeRect(r.x, r.y, r.w, r.h);
+    for (const p of SPACE_STATION_ARROW_PATHS) ctx.stroke(p);
+    for (const p of SPACE_STATION_ENGINE_PATHS) ctx.stroke(p);
+
+    ctx.restore();
+  }
+
+  // ---------- Station physics/logic ----------
+  function stationLocalToWorld(st, lx, ly) {
+    const c = Math.cos(st.angle), s = Math.sin(st.angle);
+    return { x: st.x + lx*c - ly*s, y: st.y + lx*s + ly*c };
+  }
+  function worldToStationLocal(st, wx, wy) {
+    const dx = wx - st.x, dy = wy - st.y;
+    const c = Math.cos(-st.angle), s = Math.sin(-st.angle);
+    return { x: dx*c - dy*s, y: dx*s + dy*c };
+  }
+
+  const SAUCER_DIAMETER_INGAME = 64; // matches the saucer's current in-game size (r=32)
+
+  function beginStationApproach() {
+    resetShopVisitLimits();
+    stationShopPage = 0;
+    stationShopLine = SHOP_ONE_LINERS[Math.floor(rand(0, SHOP_ONE_LINERS.length))];
+    const stationWidth = SAUCER_DIAMETER_INGAME * STATION_TRUE_RATIO * STATION_SCALE_MULTIPLIER;
+
+    const margin = stationWidth * 0.6;
+    const edge = Math.floor(rand(0, 4));
+    let startX, startY;
+    if (edge === 0)      { startX = rand(0, W); startY = -margin; }
+    else if (edge === 1) { startX = W + margin; startY = rand(0, H); }
+    else if (edge === 2) { startX = rand(0, W); startY = H + margin; }
+    else                 { startX = -margin; startY = rand(0, H); }
+
+    const parkAngle = rand(0, TWO_PI);
+    const parkDist = stationWidth * rand(0.35, 0.55);
+    const parkX = W/2 + Math.cos(parkAngle) * parkDist;
+    const parkY = H/2 + Math.sin(parkAngle) * parkDist;
+
+    station = {
+      x: startX, y: startY,
+      width: stationWidth,
+      alpha: 0,
+      angle: rand(0, TWO_PI),
+      parked: false,
+      arrival: { startX, startY, parkX, parkY, timer: 0, totalFrames: 1260 }
+    };
+    stationEngineSmoke = [];
+    stationDockFadeT = 0;
+    stationShopFadeT = 0;
+    stationSelectedCard = 0;
+    ship.vx = 0; ship.vy = 0;
+  }
+
+  function updateStationArrival() {
+    if (!station.parked) {
+      const a = station.arrival;
+      a.timer++;
+      const t = Math.min(1, a.timer / a.totalFrames);
+      const eased = 1 - Math.pow(1 - t, 3);
+      station.x = lerp(a.startX, a.parkX, eased);
+      station.y = lerp(a.startY, a.parkY, eased);
+      if (t >= 1) station.parked = true;
+    }
+    if (station.alpha < 1) station.alpha += 0.05;
+    station.angle += STATION_SPIN_RATE * STATION_SPIN_MULTIPLIER;
+  }
+
+  function updateStationEnginePush() {
+    if (!station || !ship) return;
+    const pushRadius = station.width * ENGINE_PUSH_RADIUS_RATIO;
+    for (const e of ENGINE_LOCAL_OFFSETS) {
+      const lx = e.x * station.width, ly = e.y * station.width;
+      const worldPos = stationLocalToWorld(station, lx, ly);
+      const dx = ship.x - worldPos.x, dy = ship.y - worldPos.y;
+      const d = Math.hypot(dx, dy) || 0.001;
+      if (d < pushRadius) {
+        const strength = ENGINE_PUSH_FORCE * (1 - d / pushRadius);
+        ship.vx += (dx / d) * strength;
+        ship.vy += (dy / d) * strength;
+      }
+    }
+  }
+
+  function updateStationEngineSmoke() {
+    if (!station) return;
+    for (const e of ENGINE_LOCAL_OFFSETS) {
+      const lx = e.x * station.width, ly = e.y * station.width;
+      const worldPos = stationLocalToWorld(station, lx, ly);
+      const dirLen = Math.hypot(lx, ly) || 1;
+      const c = Math.cos(station.angle), s = Math.sin(station.angle);
+      const outX = (lx/dirLen)*c - (ly/dirLen)*s;
+      const outY = (lx/dirLen)*s + (ly/dirLen)*c;
+      if (Math.random() < 0.7) {
+        stationEngineSmoke.push({
+          x: worldPos.x, y: worldPos.y,
+          vx: outX * rand(1.4, 2.4), vy: outY * rand(1.4, 2.4),
+          life: rand(70, 120), maxLife: 120,
+          size: rand(2, 4)
+        });
+      }
+    }
+    for (let i = stationEngineSmoke.length - 1; i >= 0; i--) {
+      const p = stationEngineSmoke[i];
+      p.x += p.vx; p.y += p.vy;
+      p.vx *= 0.995; p.vy *= 0.995;
+      p.life--;
+      if (p.life <= 0) stationEngineSmoke.splice(i, 1);
+    }
+  }
+
+  function drawStationEngineSmoke() {
+    for (const p of stationEngineSmoke) {
+      const t = p.life / p.maxLife;
+      const size = Math.max(1, Math.round(p.size * (0.5 + t*0.5)));
+      ctx.fillStyle = 'rgba(210,210,220,' + (t*0.5).toFixed(3) + ')';
+      ctx.fillRect(Math.round(p.x - size/2), Math.round(p.y - size/2), size, size);
+    }
+  }
+
+  function isInAnyPadChannel(local) {
+    const halfWidthPx = station.width * PAD_HALF_WIDTH_RATIO;
+    const outerDistPx = station.width * PAD_OUTER_DIST_RATIO;
+    const depthPx = PAD_DEPTH_PX;
+    for (const d of STATION_PAD_DIRECTIONS) {
+      const along = local.x*d.ox + local.y*d.oy;
+      const across = local.x*d.px + local.y*d.py;
+      if (Math.abs(across) < halfWidthPx && along > (outerDistPx - depthPx)) return true;
+    }
+    return false;
+  }
+
+  function rectPushOut(local, halfW, halfH, r) {
+    // Minimum-translation push to get a circle of radius r fully outside a
+    // rect centered on the origin - handles both "just touching the edge"
+    // and "center already inside" cases via the same min-penetration logic.
+    const ex = halfW + r, ey = halfH + r;
+    if (Math.abs(local.x) > ex || Math.abs(local.y) > ey) return null;
+    const penRight = ex - local.x, penLeft = local.x + ex;
+    const penBottom = ey - local.y, penTop = local.y + ey;
+    const minPen = Math.min(penRight, penLeft, penBottom, penTop);
+    if (minPen === penRight) return { x: penRight, y: 0 };
+    if (minPen === penLeft) return { x: -penLeft, y: 0 };
+    if (minPen === penBottom) return { x: 0, y: penBottom };
+    return { x: 0, y: -penTop };
+  }
+
+  function checkStationHullCollision() {
+    if (!station || !ship) return;
+    const local = worldToStationLocal(station, ship.x, ship.y);
+    if (isInAnyPadChannel(local)) return; // free to fly through any of the 4 pad openings
+
+    const halfThick = station.width * STATION_HULL_HALF_THICKNESS_RATIO;
+    const outerDist = station.width * PAD_OUTER_DIST_RATIO;
+
+    const pushVert = rectPushOut(local, halfThick, outerDist, ship.r);  // vertical bar
+    const pushHoriz = rectPushOut(local, outerDist, halfThick, ship.r); // horizontal bar
+
+    let push = null;
+    if (pushVert && pushHoriz) {
+      const m1 = Math.hypot(pushVert.x, pushVert.y), m2 = Math.hypot(pushHoriz.x, pushHoriz.y);
+      push = m1 < m2 ? pushVert : pushHoriz;
+    } else {
+      push = pushVert || pushHoriz;
+    }
+    if (!push) return;
+
+    const c = Math.cos(station.angle), s = Math.sin(station.angle);
+    const worldPushX = push.x*c - push.y*s, worldPushY = push.x*s + push.y*c;
+    ship.x += worldPushX;
+    ship.y += worldPushY;
+    const pushLen = Math.hypot(worldPushX, worldPushY) || 1;
+    const nx = worldPushX/pushLen, ny = worldPushY/pushLen;
+    const vDotN = ship.vx*nx + ship.vy*ny;
+    if (vDotN < 0) { ship.vx -= vDotN*nx; ship.vy -= vDotN*ny; }
+  }
+
+  function checkStationDocking() {
+    if (!station) return;
+    const local = worldToStationLocal(station, ship.x, ship.y);
+    const halfWidthPx = station.width * PAD_HALF_WIDTH_RATIO;
+    const outerDistPx = station.width * PAD_OUTER_DIST_RATIO;
+    const depthPx = PAD_DEPTH_PX;
+    for (const d of STATION_PAD_DIRECTIONS) {
+      const along = local.x*d.ox + local.y*d.oy;
+      const across = local.x*d.px + local.y*d.py;
+      const withinAcross = Math.abs(across) < halfWidthPx;
+      const withinAlong = along < outerDistPx + 15 && along > (outerDistPx - depthPx);
+      if (withinAcross && withinAlong && along < (outerDistPx - depthPx * 0.5)) {
+        state = 'docked';
+        stationDockFadeT = 0;
+        dockingResultText = 'DOCKED';
+        return;
+      }
+    }
+  }
+
+  function drawStationOpeningMarker() {
+    if (!station) return;
+    const halfWidthPx = station.width * PAD_HALF_WIDTH_RATIO;
+    const outerDistPx = station.width * PAD_OUTER_DIST_RATIO;
+    const blinkOn = Math.floor(Date.now() / 260) % 2 === 0;
+    const alpha = blinkOn ? 1 : 0.08;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(150,235,255,' + alpha.toFixed(2) + ')';
+    ctx.shadowColor = 'rgba(150,235,255,1)';
+    ctx.shadowBlur = (blinkOn ? 18 : 4) * GLOW_SCALE;
+    ctx.lineWidth = 4;
+    for (const d of STATION_PAD_DIRECTIONS) {
+      const cx = d.ox * outerDistPx, cy = d.oy * outerDistPx;
+      const p1 = stationLocalToWorld(station, cx - d.px*halfWidthPx, cy - d.py*halfWidthPx);
+      const p2 = stationLocalToWorld(station, cx + d.px*halfWidthPx, cy + d.py*halfWidthPx);
+      ctx.beginPath();
+      ctx.moveTo(p1.x, p1.y);
+      ctx.lineTo(p2.x, p2.y);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function stationColor() {
+    if (state === 'shop') return '#fff';
+    if (state !== 'docked' || stationDockFadeT <= 0) return '#5ac3f8';
+    const r = Math.round(lerp(90, 255, stationDockFadeT));
+    const g = Math.round(lerp(195, 255, stationDockFadeT));
+    const b = Math.round(lerp(248, 255, stationDockFadeT));
+    return 'rgb(' + r + ',' + g + ',' + b + ')';
+  }
+
+
+  // The original Atari Asteroids arcade font (designed by Ed Logg, preserved
+  // by Trammell Hudson: https://trmm.net/Asteroids_font/). Each glyph is a
+  // simple set of line segments on an 8x12 grid, with "FONT_UP" marking a
+  // pen lift for multi-stroke characters. Drawn with moveTo/lineTo/stroke,
+  // same technique as the ship/asteroids, so HUD and menu text match the
+  // rest of the game's glowing vector-line look instead of a filled font.
+  const VECTOR_FONT = {
+    "0": [[0,0],[8,0],[8,12],[0,12],[0,0],[8,12],"FONT_LAST"],
+    "1": [[4,0],[4,12],[3,10],"FONT_LAST"],
+    "2": [[0,12],[8,12],[8,7],[0,5],[0,0],[8,0],"FONT_LAST"],
+    "3": [[0,12],[8,12],[8,0],[0,0],"FONT_UP",[0,6],[8,6],"FONT_LAST"],
+    "4": [[0,12],[0,6],[8,6],"FONT_UP",[8,12],[8,0],"FONT_LAST"],
+    "5": [[0,0],[8,0],[8,6],[0,7],[0,12],[8,12],"FONT_LAST"],
+    "6": [[0,12],[0,0],[8,0],[8,5],[0,7],"FONT_LAST"],
+    "7": [[0,12],[8,12],[8,6],[4,0],"FONT_LAST"],
+    "8": [[0,0],[8,0],[8,12],[0,12],[0,0],"FONT_UP",[0,6],[8,6],"FONT_LAST"],
+    "9": [[8,0],[8,12],[0,12],[0,7],[8,5],"FONT_LAST"],
+    "A": [[0,0],[0,8],[4,12],[8,8],[8,0],"FONT_UP",[0,4],[8,4],"FONT_LAST"],
+    "B": [[0,0],[0,12],[4,12],[8,10],[4,6],[8,2],[4,0],[0,0],"FONT_LAST"],
+    "C": [[8,0],[0,0],[0,12],[8,12],"FONT_LAST"],
+    "D": [[0,0],[0,12],[4,12],[8,8],[8,4],[4,0],[0,0],"FONT_LAST"],
+    "E": [[8,0],[0,0],[0,12],[8,12],"FONT_UP",[0,6],[6,6],"FONT_LAST"],
+    "F": [[0,0],[0,12],[8,12],"FONT_UP",[0,6],[6,6],"FONT_LAST"],
+    "G": [[6,6],[8,4],[8,0],[0,0],[0,12],[8,12],"FONT_LAST"],
+    "H": [[0,0],[0,12],"FONT_UP",[0,6],[8,6],"FONT_UP",[8,12],[8,0],"FONT_LAST"],
+    "I": [[0,0],[8,0],"FONT_UP",[4,0],[4,12],"FONT_UP",[0,12],[8,12],"FONT_LAST"],
+    "J": [[0,4],[4,0],[8,0],[8,12],"FONT_LAST"],
+    "K": [[0,0],[0,12],"FONT_UP",[8,12],[0,6],[6,0],"FONT_LAST"],
+    "L": [[8,0],[0,0],[0,12],"FONT_LAST"],
+    "M": [[0,0],[0,12],[4,8],[8,12],[8,0],"FONT_LAST"],
+    "N": [[0,0],[0,12],[8,0],[8,12],"FONT_LAST"],
+    "O": [[0,0],[0,12],[8,12],[8,0],[0,0],"FONT_LAST"],
+    "P": [[0,0],[0,12],[8,12],[8,6],[0,5],"FONT_LAST"],
+    "Q": [[0,0],[0,12],[8,12],[8,4],[0,0],"FONT_UP",[4,4],[8,0],"FONT_LAST"],
+    "R": [[0,0],[0,12],[8,12],[8,6],[0,5],"FONT_UP",[4,5],[8,0],"FONT_LAST"],
+    "S": [[0,2],[2,0],[8,0],[8,5],[0,7],[0,12],[6,12],[8,10],"FONT_LAST"],
+    "T": [[0,12],[8,12],"FONT_UP",[4,12],[4,0],"FONT_LAST"],
+    "U": [[0,12],[0,2],[4,0],[8,2],[8,12],"FONT_LAST"],
+    "V": [[0,12],[4,0],[8,12],"FONT_LAST"],
+    "W": [[0,12],[2,0],[4,4],[6,0],[8,12],"FONT_LAST"],
+    "X": [[0,0],[8,12],"FONT_UP",[0,12],[8,0],"FONT_LAST"],
+    "Y": [[0,12],[4,6],[8,12],"FONT_UP",[4,6],[4,0],"FONT_LAST"],
+    "Z": [[0,12],[8,12],[0,0],[8,0],"FONT_UP",[2,6],[6,6],"FONT_LAST"],
+    ".": [[3,0],[4,0],"FONT_LAST"],
+    ",": [[2,0],[4,2],"FONT_LAST"],
+    "-": [[2,6],[6,6],"FONT_LAST"],
+    "+": [[1,6],[7,6],"FONT_UP",[4,9],[4,3],"FONT_LAST"],
+    "!": [[4,0],[3,2],[5,2],[4,0],"FONT_UP",[4,4],[4,12],"FONT_LAST"],
+    "#": [[0,4],[8,4],[6,2],[6,10],[8,8],[0,8],[2,10],[2,2],"FONT_LAST"],
+    "^": [[2,6],[4,12],[6,6],"FONT_LAST"],
+    "=": [[1,4],[7,4],"FONT_UP",[1,8],[7,8],"FONT_LAST"],
+    "*": [[0,0],[4,12],[8,0],[0,8],[8,8],[0,0],"FONT_LAST"],
+    "_": [[0,0],[8,0],"FONT_LAST"],
+    "/": [[0,0],[8,12],"FONT_LAST"],
+    "\\": [[0,12],[8,0],"FONT_LAST"],
+    "@": [[8,4],[4,0],[0,4],[0,8],[4,12],[8,8],[4,4],[3,6],"FONT_LAST"],
+    "$": [[6,2],[2,6],[6,10],"FONT_UP",[4,12],[4,0],"FONT_LAST"],
+    "&": [[8,0],[4,12],[8,8],[0,4],[4,0],[8,4],"FONT_LAST"],
+    "[": [[6,0],[2,0],[2,12],[6,12],"FONT_LAST"],
+    "]": [[2,0],[6,0],[6,12],[2,12],"FONT_LAST"],
+    "(": [[6,0],[2,4],[2,8],[6,12],"FONT_LAST"],
+    ")": [[2,0],[6,4],[6,8],[2,12],"FONT_LAST"],
+    "%": [[0,0],[8,12],"FONT_UP",[2,10],[2,8],"FONT_UP",[6,4],[6,2],"FONT_LAST"],
+    "<": [[6,0],[2,6],[6,12],"FONT_LAST"],
+    ">": [[2,0],[6,6],[2,12],"FONT_LAST"],
+    "|": [[4,0],[4,5],"FONT_UP",[4,6],[4,12],"FONT_LAST"],
+    ":": [[4,9],[4,7],"FONT_UP",[4,5],[4,3],"FONT_LAST"],
+    ";": [[4,9],[4,7],"FONT_UP",[4,5],[1,2],"FONT_LAST"],
+    "'": [[2,6],[6,10],"FONT_LAST"],
+    "?": [[0,8],[4,12],[8,8],[4,4],"FONT_UP",[4,1],[4,0],"FONT_LAST"],
+    " ": ["FONT_LAST"]
+  };
+
+  function drawVectorChar(ch, x, y, size) {
+    const pts = VECTOR_FONT[ch];
+    if (!pts) return;
+    let penUp = true;
+    ctx.beginPath();
+    for (const pt of pts) {
+      if (pt === 'FONT_LAST') break;
+      if (pt === 'FONT_UP') { penUp = true; continue; }
+      const sx = x + pt[0] * size;
+      const sy = y - pt[1] * size; // font is y-up internally; canvas is y-down
+      if (penUp) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
+      penUp = false;
+    }
+    ctx.stroke();
+  }
+
+  // align: 'left' | 'center' | 'right'. Glyphs are 8 units wide on a 12-unit
+  // advance (matching the original font's built-in letter spacing).
+  function drawVectorText(str, x, y, size, opts) {
+    opts = opts || {};
+    const color = opts.color || '#fff';
+    const align = opts.align || 'left';
+    str = String(str).toUpperCase();
+    const charWidth = 12 * size;
+    const totalWidth = str.length * charWidth;
+    let startX = x;
+    if (align === 'center') startX = x - totalWidth / 2;
+    else if (align === 'right') startX = x - totalWidth;
+
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.shadowColor = color;
+    ctx.shadowBlur = (opts.glow !== undefined ? opts.glow : 6) * UI_SCALE * GLOW_SCALE;
+    ctx.lineWidth = (opts.lineWidth || 2) * UI_SCALE;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    for (let i = 0; i < str.length; i++) {
+      drawVectorChar(str[i], startX + i * charWidth, y, size);
+    }
+    ctx.restore();
+  }
+
+  function drawStars() {
+    for (const s of stars) {
+      const twinkle = 0.5 + 0.5 * Math.sin(s.phase);
+      const alpha = s.baseAlpha * (0.4 + 0.6 * twinkle);
+      ctx.fillStyle = 'rgba(255,255,255,' + alpha.toFixed(3) + ')';
+      ctx.fillRect(s.x, s.y, s.size, s.size);
+    }
+  }
+
+  // Each streak lives at a fixed radial position (it doesn't travel) - it
+  // snaps to full length almost instantly, holds briefly, then contracts
+  // back to a point while fading, matching the classic lightspeed-jump look.
+  // Fully independent of the background starfield, which never moves here.
+  function spawnWarpStreaks(intensity) {
+    warpSpawnAccumulator += intensity * WARP_SPAWN_RATE;
+    while (warpSpawnAccumulator >= 1) {
+      warpSpawnAccumulator -= 1;
+      const angle = rand(0, TWO_PI);
+      const outerDist = rand(WARP_OUTER_MIN, WARP_OUTER_MAX);
+      const maxLength = Math.min(rand(100, 320), outerDist - WARP_CENTER_MASK_RADIUS);
+      warpStreaks.push({
+        angle,
+        outerDist,
+        maxLength: Math.max(10, maxLength),
+        width: rand(1, 2.5),
+        baseAlpha: intensity * rand(0.6, 1.0),
+        age: 0
+      });
+    }
+  }
+
+  function updateWarpStreaks(intensity) {
+    spawnWarpStreaks(intensity);
+    for (let i = warpStreaks.length - 1; i >= 0; i--) {
+      const s = warpStreaks[i];
+      s.age++;
+      if (s.age > WARP_STREAK_LIFE) {
+        warpStreaks.splice(i, 1);
+      }
+    }
+  }
+
+  function drawWarpStreaks(intensity) {
+    if (warpStreaks.length === 0) return;
+    ctx.save();
+    for (const s of warpStreaks) {
+      let lengthFrac;
+      if (s.age < WARP_GROW_FRAMES) {
+        const gt = s.age / WARP_GROW_FRAMES;
+        lengthFrac = 1 - (1 - gt) * (1 - gt); // ease-out: snaps to full length fast
+      } else if (s.age < WARP_GROW_FRAMES + WARP_HOLD_FRAMES) {
+        lengthFrac = 1;
+      } else {
+        const st = (s.age - WARP_GROW_FRAMES - WARP_HOLD_FRAMES) / WARP_SHRINK_FRAMES;
+        lengthFrac = Math.max(0, 1 - st * st); // ease-in: contracts back to a point
+      }
+
+      const headX = WARP_ORIGIN_X + Math.cos(s.angle) * s.outerDist;
+      const headY = WARP_ORIGIN_Y + Math.sin(s.angle) * s.outerDist;
+      const tailDist = s.outerDist - s.maxLength * lengthFrac;
+      const tailX = WARP_ORIGIN_X + Math.cos(s.angle) * tailDist;
+      const tailY = WARP_ORIGIN_Y + Math.sin(s.angle) * tailDist;
+      const alpha = s.baseAlpha * lengthFrac;
+      if (alpha <= 0.01) continue;
+
+      const grad = ctx.createLinearGradient(headX, headY, tailX, tailY);
+      grad.addColorStop(0, 'rgba(255,255,255,' + alpha.toFixed(3) + ')');
+      grad.addColorStop(1, 'rgba(255,255,255,0)');
+
+      ctx.strokeStyle = grad;
+      ctx.lineWidth = s.width;
+      ctx.beginPath();
+      ctx.moveTo(headX, headY);
+      ctx.lineTo(tailX, tailY);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  const STAR_COUNT = 330;
+  let stars = [];
+  function buildStars() {
+    stars.length = 0;
+    for (let i = 0; i < STAR_COUNT; i++) {
+      const depth = rand(0.25, 1); // 0.25 = distant/dim/slow, 1 = near/bright/fast
+      stars.push({
+        x: rand(0, W),
+        y: rand(0, H),
+        depth: depth,
+        size: depth > 0.75 ? 2 : 1,
+        baseAlpha: rand(0.25, 0.5) + depth * 0.4,
+        phase: rand(0, TWO_PI),
+        twinkleSpeed: rand(0.015, 0.05)
+      });
+    }
+  }
+
+  function updateStars() {
+    for (const s of stars) {
+      s.phase += s.twinkleSpeed;
+
+      // parallax: stars drift opposite the ship's motion, nearer stars drift faster
+      if (state === 'playing' && ship) {
+        s.x -= ship.vx * s.depth * 0.5;
+        s.y -= ship.vy * s.depth * 0.5;
+        if (s.x < 0) s.x += W;
+        if (s.x > W) s.x -= W;
+        if (s.y < 0) s.y += H;
+        if (s.y > H) s.y -= H;
+      }
+    }
+  }
+
+  let vignette;
+  function rebuildVignette() {
+    vignette = ctx.createRadialGradient(
+      W/2, H/2, H * 0.35,
+      W/2, H/2, H * 0.75
+    );
+    vignette.addColorStop(0, 'rgba(0,0,0,0)');
+    vignette.addColorStop(0.7, 'rgba(0,0,0,0.55)');
+    vignette.addColorStop(1, 'rgba(0,0,0,0.92)');
+  }
+
+  function drawVignette() {
+    ctx.fillStyle = vignette;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  function drawPlayAreaBoundary() {
+    ctx.save();
+    ctx.strokeStyle = 'rgba(150,190,220,0.10)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(0.5, 0.5, W - 1, H - 1);
+    ctx.restore();
+  }
+
+  // Faint oscilloscope-style graticule, drawn behind everything else.
+  const SCOPE_GRID_SPACING = 80;
+  const SCOPE_GRID_COLOR = 'rgba(255,255,255,0.03)';
+
+  // Subtle parallax: the grid drifts a little opposite the ship's position,
+  // smoothed so it eases rather than snapping frame to frame.
+  const SCOPE_PARALLAX_MAX = 24; // max pixel shift at either extreme
+  const SCOPE_PARALLAX_EASE = 0.05;
+  let scopeGridOffsetX = 0;
+  let scopeGridOffsetY = 0;
+
+  function drawScopeGrid() {
+    const targetOffsetX = ship ? ((ship.x - W/2) / (W/2)) * SCOPE_PARALLAX_MAX : 0;
+    const targetOffsetY = ship ? ((ship.y - H/2) / (H/2)) * SCOPE_PARALLAX_MAX : 0;
+    scopeGridOffsetX += (targetOffsetX - scopeGridOffsetX) * SCOPE_PARALLAX_EASE;
+    scopeGridOffsetY += (targetOffsetY - scopeGridOffsetY) * SCOPE_PARALLAX_EASE;
+
+    ctx.save();
+    ctx.translate(scopeGridOffsetX, scopeGridOffsetY);
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = SCOPE_GRID_COLOR;
+    ctx.beginPath();
+    for (let x = SCOPE_GRID_SPACING; x < W; x += SCOPE_GRID_SPACING) {
+      ctx.moveTo(x + 0.5, 0);
+      ctx.lineTo(x + 0.5, H);
+    }
+    for (let y = SCOPE_GRID_SPACING; y < H; y += SCOPE_GRID_SPACING) {
+      ctx.moveTo(0, y + 0.5);
+      ctx.lineTo(W, y + 0.5);
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function clampEntitiesToBounds() {
+    function rewrap(o) {
+      if (!o) return;
+      o.x = ((o.x % W) + W) % W;
+      o.y = ((o.y % H) + H) % H;
+    }
+    if (ship) rewrap(ship);
+    if (saucer) rewrap(saucer);
+    if (asteroids) for (const a of asteroids) rewrap(a);
+    if (bullets) for (const b of bullets) rewrap(b);
+    if (saucerBullets) for (const b of saucerBullets) rewrap(b);
+    if (particles) for (const p of particles) rewrap(p);
+    if (trail) for (const p of trail) rewrap(p);
+  }
+
+  function drawLifeIcons() {
+    const size = 9 * UI_SCALE;
+    const spacing = 22 * UI_SCALE;
+    const startX = 24 * UI_SCALE + size;
+    const y = 66 * UI_SCALE;
+    for (let i = 0; i < lives; i++) {
+      const x = startX + i * spacing;
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(-Math.PI / 2);
+      ctx.strokeStyle = '#fff';
+      ctx.shadowColor = '#fff';
+      ctx.shadowBlur = 6 * UI_SCALE * GLOW_SCALE;
+      ctx.lineWidth = 2 * UI_SCALE;
+      ctx.beginPath();
+      ctx.moveTo(size, 0);
+      ctx.lineTo(-size*0.7, size*0.6);
+      ctx.lineTo(-size*0.4, 0);
+      ctx.lineTo(-size*0.7, -size*0.6);
+      ctx.closePath();
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  function drawCurrencyHud() {
+    const scoreRowY = 34 * UI_SCALE;
+    const iconSize = 15 * UI_SCALE;
+    const marginRight = 20 * UI_SCALE;
+    const iconX = W - marginRight - iconSize;
+    const iconY = scoreRowY - iconSize;
+    const color = 'rgb(' + PICKUP_COLOR + ')';
+
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 6 * UI_SCALE * GLOW_SCALE;
+    ctx.lineWidth = 2 * UI_SCALE;
+    ctx.strokeRect(iconX + 0.5, iconY + 0.5, iconSize, iconSize);
+    ctx.restore();
+
+    drawVectorText(String(currency).padStart(3, '0'), iconX - 10 * UI_SCALE, scoreRowY, 1.1 * UI_SCALE,
+      { align: 'right', color: color, glow: 6 });
+  }
+
+  function drawFireHint() {
+    if (!USE_FIRE_BUTTON) return;
+    if (!isTouchDevice) return;
+    if (state !== 'playing' && state !== 'approaching') return;
+    const g = fireButtonGeometry();
+    const active = dragFireActive;
+    ctx.save();
+    ctx.strokeStyle = active ? 'rgba(255,255,255,0.85)' : 'rgba(255,255,255,0.18)';
+    ctx.shadowColor = 'rgba(255,255,255,0.9)';
+    ctx.shadowBlur = (active ? 10 : 0) * UI_SCALE * GLOW_SCALE;
+    ctx.lineWidth = 2 * UI_SCALE;
+    ctx.beginPath();
+    ctx.arc(g.cx, g.cy, g.radius, 0, TWO_PI);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawHud() {
+    drawVectorText('SCORE:' + score, 20 * UI_SCALE, 34 * UI_SCALE, 1.3 * UI_SCALE, { glow: 6 });
+    if (state === 'playing' || state === 'levelstart') {
+      drawVectorText('WAVE ' + String(level).padStart(2, '0'), W/2, 34 * UI_SCALE, 1.1 * UI_SCALE,
+        { align: 'center', glow: 6 });
+    }
+    drawLifeIcons();
+    drawCurrencyHud();
+    drawFireHint();
+
+    if (state === 'playing') {
+      const dustPct = Math.floor((dustCollected / DUST_THRESHOLD) * 100);
+      drawVectorText('DUST:' + dustPct + '%', 20 * UI_SCALE, 96 * UI_SCALE, 0.8 * UI_SCALE,
+        { color: 'rgb(150,230,255)', glow: 6 });
+
+      let y = 116 * UI_SCALE;
+      if (activeBuff) {
+        const secondsLeft = Math.ceil(activeBuff.timer / 60);
+        drawVectorText(BUFF_NAMES[activeBuff.type] + ' ' + secondsLeft + 'S', 20 * UI_SCALE, y, 0.85 * UI_SCALE,
+          { color: 'rgb(150,230,255)', glow: 8 });
+        y += 20 * UI_SCALE;
+      }
+      if (nextBuffType) {
+        drawVectorText('NEXT:' + BUFF_NAMES[nextBuffType], 20 * UI_SCALE, y, 0.75 * UI_SCALE,
+          { color: 'rgba(150,230,255,0.7)', glow: 3 });
+      }
+    }
+  }
+
+  function blinkOn() {
+    return Math.floor(Date.now() / 500) % 2 === 0;
+  }
+
+  // ---------- Upgrade shop UI ----------
+  const SHOP_CARD_W = 190, SHOP_CARD_H = 180, SHOP_GAP_X = 36, SHOP_GAP_Y = 28;
+  const SHOP_PAGE_SIZE = 4;
+  let stationShopPage = 0;
+  const SHOP_ONE_LINERS = [
+    "You have travelled far.",
+    "It's been a long time since I saw a ship like yours.",
+    "Nice to see a new face. I had almost forgotten what that meant.",
+    "You're a long way from anywhere.",
+    "Still searching, are you?",
+    "I won't ask what brought you here.",
+    "Most pilots don't come this far twice.",
+    "You look like someone who has forgotten the way home.",
+    "The station is quiet tonight. It usually is.",
+    "I've seen many ships pass through. Few of them return.",
+    "You can rest here, if you still remember how.",
+    "There are places even I don't go anymore.",
+    "The lights are on. That's something.",
+    "I stopped counting the years a long time ago.",
+    "We don't get many visitors out here.",
+    "You're carrying more than cargo, I think.",
+    "The last pilot asked the same questions.",
+    "He never came back for his answer.",
+    "You're not the first to follow that signal.",
+    "Whatever you're looking for, it may not be waiting.",
+    "I could tell you what lies ahead. I could also be wrong.",
+    "The old routes are gone now.",
+    "Some say there's still a place beyond the dark.",
+    "I've heard your kind of story before.",
+    "You should leave before the lights go out.",
+    "The station remembers everyone who stops here.",
+    "You have the look of someone who has seen too much space.",
+    "If you find what you're looking for, don't wake it.",
+    "There's no shame in turning back. Few do.",
+    "Safe travels, pilot. If there is such a thing.",
+    "Don't follow the lights beyond the station.",
+    "You're earlier than I expected.",
+    "I wondered when you would arrive.",
+    "No, we've never met. Not here.",
+    "The dark has been asking about you.",
+    "I keep this station open for reasons I've forgotten.",
+    "You came from that direction? Then you've already seen it.",
+    "Some things are better left without a name.",
+    "If you hear singing, keep flying.",
+    "You should not be able to see that from here."
+  ];
+  let stationShopLine = '';
+  function currentPageUpgrades() {
+    const start = stationShopPage * SHOP_PAGE_SIZE;
+    return UPGRADES.slice(start, start + SHOP_PAGE_SIZE);
+  }
+  function totalShopPages() {
+    return Math.ceil(UPGRADES.length / SHOP_PAGE_SIZE);
+  }
+
+  function shopCardRects() {
+    const cols = 2, rows = 2;
+    const cardW = SHOP_CARD_W * UI_SCALE, cardH = SHOP_CARD_H * UI_SCALE;
+    const gapX = SHOP_GAP_X * UI_SCALE, gapY = SHOP_GAP_Y * UI_SCALE;
+    const totalW = cols*cardW + (cols-1)*gapX;
+    const totalH = rows*cardH + (rows-1)*gapY;
+    const leaveGap = 30 * UI_SCALE, leaveH = 46 * UI_SCALE;
+    const fullBlockH = totalH + leaveGap + leaveH;
+    const startX = W/2 - totalW/2;
+    const startY = H/2 - fullBlockH/2;
+    const pageItems = currentPageUpgrades();
+    const rects = [];
+    for (let i = 0; i < pageItems.length; i++) {
+      const col = i % cols, row = Math.floor(i / cols);
+      rects.push({
+        upgrade: pageItems[i],
+        x: startX + col*(cardW+gapX),
+        y: startY + row*(cardH+gapY),
+        w: cardW, h: cardH
+      });
+    }
+    return rects;
+  }
+  function drawShopArrowTriangle(cx, cy, size, direction) {
+    ctx.beginPath();
+    if (direction < 0) {
+      ctx.moveTo(cx + size*0.4, cy - size*0.55);
+      ctx.lineTo(cx - size*0.4, cy);
+      ctx.lineTo(cx + size*0.4, cy + size*0.55);
+    } else {
+      ctx.moveTo(cx - size*0.4, cy - size*0.55);
+      ctx.lineTo(cx + size*0.4, cy);
+      ctx.lineTo(cx - size*0.4, cy + size*0.55);
+    }
+    ctx.closePath();
+    ctx.stroke();
+  }
+
+  function shopGridTopY() {
+    const cols = 2, rows = 2;
+    const cardH = SHOP_CARD_H * UI_SCALE, gapY = SHOP_GAP_Y * UI_SCALE;
+    const totalH = rows*cardH + (rows-1)*gapY;
+    const leaveGap = 30 * UI_SCALE, leaveH = 46 * UI_SCALE;
+    const fullBlockH = totalH + leaveGap + leaveH;
+    return H/2 - fullBlockH/2;
+  }
+  function shopLeaveRect() {
+    const cols = 2, rows = 2;
+    const cardH = SHOP_CARD_H * UI_SCALE, gapY = SHOP_GAP_Y * UI_SCALE;
+    const totalH = rows*cardH + (rows-1)*gapY;
+    const bottomOfGrid = shopGridTopY() + totalH;
+    return { x: W/2 - 90*UI_SCALE, y: bottomOfGrid + 30*UI_SCALE, w: 180*UI_SCALE, h: 46*UI_SCALE };
+  }
+  function shopPageArrowRects() {
+    const topY = shopGridTopY();
+    const rows = 2;
+    const cardH = SHOP_CARD_H * UI_SCALE, gapY = SHOP_GAP_Y * UI_SCALE;
+    const gridH = rows*cardH + (rows-1)*gapY;
+    const cardW = SHOP_CARD_W * UI_SCALE, gapX = SHOP_GAP_X * UI_SCALE;
+    const gridHalfW = (cardW*2 + gapX) / 2;
+    const w = Math.min(70 * UI_SCALE, W * 0.12);
+    const h = gridH;
+    const desiredGap = 40 * UI_SCALE; // stay close to the grid on wide/desktop screens
+    const margin = 16 * UI_SCALE;     // but never get pushed off-screen on narrow ones
+
+    let prevX = W/2 - gridHalfW - desiredGap - w;
+    let nextX = W/2 + gridHalfW + desiredGap;
+    prevX = Math.max(margin, prevX);
+    nextX = Math.min(W - margin - w, nextX);
+
+    return {
+      prev: { x: prevX, y: topY, w, h },
+      next: { x: nextX, y: topY, w, h }
+    };
+  }
+
+  function drawShopCard(card, index) {
+    const u = card.upgrade;
+    const cost = upgradeCost(u);
+    const affordable = cost !== null && currency >= cost;
+    const locked = cost === null;
+    const selected = index === stationSelectedCard;
+
+    ctx.save();
+    ctx.globalAlpha = stationShopFadeT * (locked ? 0.3 : 1);
+
+    ctx.fillStyle = selected ? 'rgba(150,235,255,0.10)' : 'rgba(255,255,255,0.05)';
+    ctx.fillRect(card.x, card.y, card.w, card.h);
+    ctx.strokeStyle = selected ? 'rgb(150,235,255)' : (affordable ? 'rgba(255,255,255,0.6)' : 'rgba(255,255,255,0.25)');
+    ctx.lineWidth = selected ? 3 : 2;
+    ctx.shadowColor = ctx.strokeStyle;
+    ctx.shadowBlur = (selected ? 14 : 0) * GLOW_SCALE;
+    ctx.strokeRect(card.x, card.y, card.w, card.h);
+
+    ctx.strokeStyle = '#fff';
+    ctx.fillStyle = '#fff';
+    ctx.lineWidth = 2 * UI_SCALE;
+    ctx.shadowColor = '#fff';
+    ctx.shadowBlur = 6 * UI_SCALE * GLOW_SCALE;
+    u.icon(card.x + card.w/2, card.y + 58*UI_SCALE, 70*UI_SCALE);
+
+    ctx.shadowBlur = 0;
+    const nameLabel = u.type === 'stackable' && u.level > 0 ? u.name + ' LV' + u.level : u.name;
+    drawVectorText(nameLabel, card.x + card.w/2, card.y + 112*UI_SCALE, 0.85*UI_SCALE, { align: 'center', glow: 3 });
+    drawVectorText(u.describe(u), card.x + card.w/2, card.y + 130*UI_SCALE, 0.55*UI_SCALE,
+      { align: 'center', color: 'rgba(255,255,255,0.6)' });
+
+    if (locked) {
+      let label;
+      if (u.type === 'onetime') {
+        if (u.owned) label = 'OWNED';
+        else if (u.requires && !upgradeIsOwned(u.requires)) label = 'NEEDS ' + findUpgrade(u.requires).name;
+        else label = 'OWNED';
+      }
+      else if (u.level >= u.maxLevel) label = 'MAX LEVEL';
+      else label = 'NEXT VISIT';
+      drawVectorText(label, card.x + card.w/2, card.y + card.h - 12*UI_SCALE, 0.7*UI_SCALE,
+        { align: 'center', color: 'rgb(150,235,255)', glow: 4 });
+    } else {
+      const label = String(cost);
+      const costColor = affordable ? 'rgb(255,225,60)' : 'rgba(255,225,60,0.4)';
+      const iconX = card.x + card.w/2 + 18*UI_SCALE;
+      drawVectorText(label, iconX - 8*UI_SCALE, card.y + card.h - 10*UI_SCALE, 0.85*UI_SCALE, { align: 'right', color: costColor, glow: 3 });
+      ctx.strokeStyle = costColor;
+      ctx.lineWidth = 2 * UI_SCALE;
+      ctx.strokeRect(iconX, card.y + card.h - 23*UI_SCALE, 13*UI_SCALE, 13*UI_SCALE);
+    }
+    ctx.restore();
+  }
+
+  function drawShopUI() {
+    const a = stationShopFadeT;
+    if (a <= 0.01) return;
+    ctx.save();
+    ctx.globalAlpha = a;
+    ctx.fillStyle = 'rgba(5,7,12,0.75)';
+    ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+
+    drawCurrencyHud(); // same spot/style as normal play - not re-derived
+
+    if (stationShopLine) {
+      drawVectorText(stationShopLine, W/2, shopGridTopY() - 62*UI_SCALE, 1.15*UI_SCALE,
+        { align: 'center', color: 'rgba(255,255,255,' + a.toFixed(2) + ')', lineWidth: 3, glow: 4 * a });
+    }
+
+    const pageItems = currentPageUpgrades();
+    shopCardRects().forEach((card, i) => drawShopCard(card, i));
+
+    // page arrows + indicator
+    const pages = totalShopPages();
+    if (pages > 1) {
+      const arrows = shopPageArrowRects();
+      const pageItemsForArrows = currentPageUpgrades();
+      const prevSelected = stationSelectedCard === pageItemsForArrows.length + 1;
+      const nextSelected = stationSelectedCard === pageItemsForArrows.length + 2;
+      ctx.save();
+      ctx.globalAlpha = a;
+      for (const [key, selected] of [['prev', prevSelected], ['next', nextSelected]]) {
+        const r = arrows[key];
+        ctx.fillStyle = selected ? 'rgba(150,235,255,0.10)' : 'rgba(255,255,255,0.0)';
+        if (selected) ctx.fillRect(r.x, r.y, r.w, r.h);
+        ctx.strokeStyle = selected ? 'rgb(150,235,255)' : 'rgba(255,255,255,0.6)';
+        ctx.lineWidth = selected ? 3 : 2;
+        ctx.shadowColor = ctx.strokeStyle;
+        ctx.shadowBlur = (selected ? 14 : 0) * GLOW_SCALE;
+        ctx.strokeRect(r.x, r.y, r.w, r.h);
+      }
+      ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+      ctx.shadowBlur = 0;
+      const triSize = Math.min(arrows.prev.w, arrows.prev.h) * 0.5;
+      ctx.strokeStyle = prevSelected ? 'rgb(150,235,255)' : 'rgba(255,255,255,0.6)';
+      drawShopArrowTriangle(arrows.prev.x + arrows.prev.w/2, arrows.prev.y + arrows.prev.h/2, triSize, -1);
+      ctx.strokeStyle = nextSelected ? 'rgb(150,235,255)' : 'rgba(255,255,255,0.6)';
+      drawShopArrowTriangle(arrows.next.x + arrows.next.w/2, arrows.next.y + arrows.next.h/2, triSize, 1);
+      ctx.restore();
+      drawVectorText('PAGE ' + (stationShopPage+1) + '/' + pages, W/2, shopGridTopY() - 14*UI_SCALE, 0.7*UI_SCALE,
+        { align: 'center', color: 'rgba(255,255,255,' + (a*0.7).toFixed(2) + ')' });
+    }
+
+    const lv = shopLeaveRect();
+    const leaveSelected = stationSelectedCard === pageItems.length;
+    ctx.save();
+    ctx.globalAlpha = a;
+    ctx.fillStyle = leaveSelected ? 'rgba(150,235,255,0.10)' : 'rgba(255,255,255,0.08)';
+    ctx.fillRect(lv.x, lv.y, lv.w, lv.h);
+    ctx.strokeStyle = leaveSelected ? 'rgb(150,235,255)' : 'rgba(255,255,255,0.6)';
+    ctx.lineWidth = leaveSelected ? 3 : 2;
+    ctx.shadowColor = ctx.strokeStyle;
+    ctx.shadowBlur = (leaveSelected ? 14 : 0) * GLOW_SCALE;
+    ctx.strokeRect(lv.x, lv.y, lv.w, lv.h);
+    ctx.restore();
+    drawVectorText('LEAVE', lv.x + lv.w/2, lv.y + lv.h/2 + 7*UI_SCALE, 1.2*UI_SCALE,
+      { align: 'center', color: 'rgba(255,255,255,' + a.toFixed(2) + ')', glow: 4 * a });
+
+    if (stationShopMessageTimer > 0 && stationShopMessage) {
+      const msgAlpha = Math.min(1, stationShopMessageTimer/30) * a;
+      drawVectorText(stationShopMessage, W/2, lv.y + lv.h + 40*UI_SCALE, 1*UI_SCALE,
+        { align: 'center', color: 'rgba(255,255,255,' + msgAlpha.toFixed(2) + ')' });
+    }
+  }
+
+  function changeShopPage(delta) {
+    const pages = totalShopPages();
+    stationShopPage = (stationShopPage + delta + pages) % pages;
+    stationSelectedCard = 0;
+  }
+
+  function handleShopClick(x, y) {
+    if (stationShopFadeT < 0.8) return;
+    if (totalShopPages() > 1) {
+      const arrows = shopPageArrowRects();
+      const p = arrows.prev, n = arrows.next;
+      if (x >= p.x && x <= p.x+p.w && y >= p.y && y <= p.y+p.h) { changeShopPage(-1); return; }
+      if (x >= n.x && x <= n.x+n.w && y >= n.y && y <= n.y+n.h) { changeShopPage(1); return; }
+    }
+    const rects = shopCardRects();
+    for (let i = 0; i < rects.length; i++) {
+      const card = rects[i];
+      if (x >= card.x && x <= card.x+card.w && y >= card.y && y <= card.y+card.h) {
+        stationSelectedCard = i;
+        purchaseUpgrade(card.upgrade);
+        return;
+      }
+    }
+    const lv = shopLeaveRect();
+    if (x >= lv.x && x <= lv.x+lv.w && y >= lv.y && y <= lv.y+lv.h) {
+      stationSelectedCard = currentPageUpgrades().length;
+      leaveStationShop();
+    }
+  }
+
+  function leaveStationShop() {
+    station = null;
+    dockingResultText = '';
+
+    state = 'levelstart';
+    stateTimer = LEVEL_TRANSITION_FRAMES;
+    transitionShip = { startX: ship.x, startY: ship.y, startAngle: ship.angle };
+    ship.vx = 0;
+    ship.vy = 0;
+    ship.scale = 1;
+    warpIntensity = 0;
+    particles = [];
+    trail = [];
+    levelSpawnedThisTransition = false;
+    activeBuff = null;
+    warpStreaks = [];
+    warpSpawnAccumulator = 3;
+    bullets = [];
+    saucerBullets = [];
+    pickups = [];
+    missiles = [];
+    pendingStationVisit = false; // startLevel() runs at the normal point in the levelstart sequence
+  }
+
+  // ---------- Intro screen logo (from uploaded SVG, converted to filled paths) ----------
+  const INTRO_LOGO_PATHS = [
+    "m 98.150911,175.37773 c 0.0161,-0.0666 0.87711,-3.13534 1.913439,-6.81936 1.47752,-5.25239 1.91772,-6.76223 2.03935,-6.9948 0.18769,-0.35887 0.53653,-0.69313 0.83109,-0.79632 0.29152,-0.10212 0.82051,-0.13368 1.16172,-0.0693 0.52041,0.0982 0.88114,0.38526 1.14519,0.91133 0.103,0.20521 0.58973,1.90719 3.26432,11.41456 l 0.68969,2.45163 -1.11691,0.0117 c -0.6143,0.006 -1.12499,0.003 -1.13486,-0.006 -0.01,-0.01 -0.25025,-0.85241 -0.53418,-1.87231 l -0.51623,-1.85436 -2.23336,-0.0114 -2.23336,-0.0114 -0.24844,0.88693 c -0.13663,0.4878 -0.37161,1.33018 -0.52217,1.87195 l -0.27374,0.98503 -1.130369,0.0117 -1.13037,0.0117 z m 7.102449,-5.86716 c -0.0453,-0.21645 -1.55763,-5.44996 -1.58194,-5.47427 -0.013,-0.013 -0.0311,-0.0155 -0.0402,-0.006 -0.009,0.0101 -0.36457,1.23969 -0.78992,2.73255 -0.42536,1.49288 -0.7837,2.74879 -0.79632,2.79092 -0.0216,0.072 0.075,0.0766 1.60531,0.0766 h 1.62825 z m 5.48662,-0.33929 v -6.32609 h -1.53227 -1.53227 v -1.09447 -1.09448 h 4.18091 4.18091 v 1.09392 1.09392 l -1.54322,0.0115 -1.54321,0.0115 -0.0111,6.31514 -0.0111,6.31514 h -1.09433 -1.09433 z m 3.94012,6.29236 c 0,-0.0194 0.85628,-3.07795 1.90284,-6.79683 1.41444,-5.02609 1.94268,-6.84222 2.05803,-7.07562 0.1864,-0.37716 0.53202,-0.71522 0.84235,-0.82394 0.29151,-0.10212 0.8205,-0.13368 1.16171,-0.0693 0.51978,0.0981 0.88119,0.38535 1.14427,0.90952 0.0632,0.12588 0.2806,0.8154 0.48316,1.53227 0.20256,0.71686 1.0603,3.7617 1.90609,6.76631 0.84578,3.00461 1.54887,5.49181 1.56241,5.52712 0.0212,0.0554 -0.13191,0.0642 -1.11747,0.0642 h -1.1421 l -0.0279,-0.11105 c -0.0153,-0.0611 -0.24919,-0.90328 -0.51969,-1.87156 l -0.49181,-1.76051 -2.2038,-0.0114 c -1.29652,-0.007 -2.22035,0.005 -2.244,0.0288 -0.0221,0.0221 -0.27038,0.8645 -0.55172,1.87197 l -0.51152,1.83177 -1.12543,0.0117 c -0.61899,0.006 -1.12544,-0.004 -1.12544,-0.0235 z m 7.12146,-5.95307 c -0.0507,-0.23967 -1.55285,-5.4455 -1.57872,-5.47137 -0.0146,-0.0146 -0.0336,-0.0184 -0.0422,-0.008 -0.009,0.01 -0.36423,1.23968 -0.79023,2.73255 -0.42598,1.49286 -0.78471,2.74878 -0.79716,2.79092 -0.0213,0.072 0.0755,0.0766 1.60561,0.0766 h 1.62825 z m 5.18125,-0.59102 c 5.7e-4,-7.10958 -0.006,-6.9028 0.23273,-7.37334 0.1327,-0.26187 0.44784,-0.56061 0.71697,-0.67966 0.38998,-0.17251 0.78179,-0.20717 2.36007,-0.20878 1.13347,-0.001 1.58406,0.0142 1.86834,0.0638 1.3008,0.22684 2.36449,1.0354 2.91793,2.21804 0.61232,1.30848 0.56384,3.26556 -0.11145,4.49818 -0.33466,0.61086 -0.74461,1.01649 -1.45098,1.43566 -0.57299,0.34003 -0.70429,0.43714 -0.80238,0.59342 -0.10796,0.17201 -0.0899,0.42137 0.0505,0.69646 0.051,0.10001 0.86048,1.33316 1.79879,2.74032 0.93831,1.40716 1.69973,2.56303 1.69205,2.56859 -0.008,0.006 -0.5853,0.001 -1.28358,-0.009 l -1.26959,-0.0196 -1.71366,-2.58875 c -0.94251,-1.42382 -1.75667,-2.67467 -1.80925,-2.77968 -0.32636,-0.65171 -0.24151,-1.52054 0.19046,-1.95048 0.12986,-0.12924 0.3318,-0.2461 0.72132,-0.41743 0.93756,-0.41235 1.44385,-0.77396 1.80857,-1.29173 0.29565,-0.41971 0.40631,-0.79266 0.40328,-1.35916 -0.006,-1.19058 -0.53134,-1.94261 -1.49937,-2.14779 -0.19654,-0.0417 -0.59126,-0.0618 -1.22202,-0.0623 -1.04417,-5.7e-4 -1.17252,0.0254 -1.32179,0.27023 -0.0875,0.14352 -0.0884,0.20377 -0.0885,6.26305 l -1.6e-4,6.11814 h -1.09448 -1.09448 l 5.7e-4,-6.57782 z m 10.55001,-0.84275 v -7.42056 h 1.09448 1.09448 v 7.42056 7.42057 h -1.09448 -1.09448 z m 3.21468,-8.02878 c -0.63804,-0.28978 -0.70191,-1.18152 -0.11352,-1.58469 0.12974,-0.0889 0.20675,-0.10549 0.48927,-0.10549 0.29487,0 0.35634,0.0145 0.50989,0.12099 0.4443,0.3079 0.52764,0.93252 0.17763,1.33116 -0.26844,0.30573 -0.70101,0.40257 -1.06327,0.23803 z m 0.59852,-0.0552 c 0.39237,-0.13309 0.58548,-0.42079 0.55601,-0.82834 -0.0394,-0.54536 -0.57629,-0.8819 -1.07463,-0.67368 -0.31592,0.132 -0.49271,0.4026 -0.49271,0.75415 0,0.35533 0.21402,0.6234 0.61291,0.76767 0.10993,0.0398 0.24216,0.0332 0.39842,-0.0198 z m -0.57354,-0.75945 v -0.54723 h 0.25431 c 0.3216,0 0.41989,0.0667 0.41989,0.28507 0,0.11905 -0.028,0.1867 -0.10229,0.24682 -0.0925,0.0749 -0.0959,0.09 -0.0359,0.15853 0.0664,0.0757 0.20825,0.33462 0.20825,0.37999 0,0.0132 -0.0294,0.0241 -0.0653,0.0241 -0.0359,0 -0.12644,-0.10835 -0.20118,-0.24078 -0.0903,-0.16002 -0.16386,-0.24079 -0.21927,-0.24079 -0.0719,0 -0.0834,0.0332 -0.0834,0.24079 0,0.21159 -0.0106,0.24078 -0.0876,0.24078 -0.0829,0 -0.0875,-0.0292 -0.0875,-0.54724 z m 0.45655,-0.0907 c 0.15376,-0.15375 0.0424,-0.36899 -0.191,-0.36899 -0.0793,0 -0.0904,0.0269 -0.0904,0.21889 0,0.20259 0.008,0.2189 0.10632,0.2189 0.0585,0 0.13727,-0.0309 0.17511,-0.0688 z M 98.700721,155.1445 v -2.49092 l 0.29551,-0.0502 c 0.92506,-0.15724 2.302759,-0.56957 3.237019,-0.96878 2.9739,-1.27077 5.61456,-3.61997 7.81705,-6.95428 0.59811,-0.90546 1.19701,-2.27502 1.63106,-3.72992 1.07647,-3.60821 1.68337,-8.84555 1.68493,-14.54043 l 4.5e-4,-1.60888 h 1.25488 1.25489 l -0.029,3.81973 c -0.0636,8.37432 -0.29192,11.88615 -0.96953,14.91204 -0.57113,2.55038 -1.70301,4.9927 -3.15763,6.81336 -0.48272,0.60419 -1.89158,2.01971 -2.55641,2.56847 -2.59295,2.14031 -5.46102,3.63964 -8.34906,4.36463 -0.6404,0.16076 -1.738319,0.35613 -2.001339,0.35613 h -0.11281 z m 18.168349,-13.92626 v -16.41715 h 2.38596 2.38596 v 16.41718 16.41718 h -2.38596 -2.38596 z m 22.19602,16.34527 c -4.57629,-0.69678 -9.82575,-3.89642 -12.67601,-7.72625 -1.20937,-1.62501 -2.25666,-4.0189 -2.77474,-6.34251 -0.6868,-3.08034 -0.96396,-7.68775 -0.96584,-16.056 l -5.7e-4,-2.63769 h 1.24771 1.24771 v 1.78462 c 0,8.1359 1.21445,14.84359 3.26522,18.03452 1.18712,1.84712 2.80938,3.66835 4.40712,4.94766 1.90651,1.52656 4.33834,2.62838 6.69816,3.03483 l 0.29551,0.0509 v 2.49092 2.49092 l -0.16417,-0.005 c -0.0903,-0.002 -0.35133,-0.0328 -0.58008,-0.0676 z",
+    "m 93.572536,191.32601 -1.326956,1.32696 h -2.653913 l -1.326956,-1.32696 v -2.65391 l 1.326956,-1.32696 h 2.653913 l 1.326956,1.32696 v 0.44232 h -1.769275 v -0.88464 h -1.769275 v 3.53855 h 1.769275 v -0.88464 h 1.769275 z m 7.077104,1.32696 h -5.307829 v -5.30783 h 1.769275 v 4.42319 h 3.538554 z m 7.0771,0 h -1.76928 v -0.88464 h -1.76927 v 0.88464 h -1.76928 v -3.09623 l 2.21159,-2.2116 h 0.88464 l 2.2116,2.2116 z m -1.76928,-1.76928 v -1.76927 h -1.76927 v 1.76927 z m 8.84638,0.44232 -1.32696,1.32696 h -3.09623 v -0.88464 h 2.65391 v -1.76927 h -2.21159 l -1.32696,-1.32696 1.32696,-1.32696 h 3.09623 v 0.88464 h -2.65391 v 0.88464 h 2.21159 l 1.32696,1.32696 z m 7.0771,0 -1.32696,1.32696 h -3.09623 v -0.88464 h 2.65391 v -1.76927 h -2.21159 l -1.32696,-1.32696 1.32696,-1.32696 h 3.09623 v 0.88464 h -2.65391 v 0.88464 h 2.21159 l 1.32696,1.32696 z m 7.07709,1.32696 h -5.30782 v -0.88464 h 1.76927 v -3.53855 h -1.76927 v -0.88464 h 5.30782 v 0.88464 h -1.76927 v 3.53855 h 1.76927 z m 7.07711,-1.32696 -1.32696,1.32696 h -2.65391 l -1.32696,-1.32696 v -2.65391 l 1.32696,-1.32696 h 2.65391 l 1.32696,1.32696 v 0.44232 h -1.76928 v -0.88464 h -1.76927 v 3.53855 h 1.76927 v -0.88464 h 1.76928 z m 7.0771,0 -1.32696,1.32696 h -3.09623 v -0.88464 h 2.65391 v -1.76927 h -2.21159 l -1.32696,-1.32696 1.32696,-1.32696 h 3.09623 v 0.88464 h -2.65391 v 0.88464 h 2.21159 l 1.32696,1.32696 z",
+    "m 153.96671,190.76919 h -3.08045 v 3.08045 h -3.08045 v -3.08045 h -3.08045 v -1.54023 h 3.08045 v -3.08045 h 3.08045 v 3.08045 h 3.08045 z"
+  ].map(d => new Path2D(d));
+  const INTRO_LOGO_OFFSET_X = -88.264707, INTRO_LOGO_OFFSET_Y = -124.80106;
+  const INTRO_LOGO_SRC_WIDTH = 65.702026, INTRO_LOGO_SRC_HEIGHT = 69.048576;
+
+  function drawIntroLogo(cx, cy, targetWidth, alpha) {
+    const scale = targetWidth / INTRO_LOGO_SRC_WIDTH;
+    const targetHeight = INTRO_LOGO_SRC_HEIGHT * scale;
+    ctx.save();
+    ctx.globalAlpha = alpha === undefined ? 1 : alpha;
+    ctx.translate(cx - targetWidth/2, cy - targetHeight/2);
+    ctx.scale(scale, scale);
+    ctx.translate(INTRO_LOGO_OFFSET_X, INTRO_LOGO_OFFSET_Y);
+    ctx.fillStyle = '#fff';
+    ctx.shadowColor = '#fff';
+    ctx.shadowBlur = 5 * GLOW_SCALE / scale;
+    for (const p of INTRO_LOGO_PATHS) ctx.fill(p);
+    ctx.restore();
+  }
+
+  function drawIntroScreen() {
+    drawIntroLogo(W/2, H/2 - 20*UI_SCALE, Math.min(320*UI_SCALE, W*0.7));
+    if (blinkOn()) {
+      drawVectorText('PRESS ENTER OR TAP TO CONTINUE', W/2, H/2 + 230*UI_SCALE, 1*UI_SCALE,
+        { align: 'center', glow: 4 });
+    }
+  }
+
+  function drawMenuScreen() {
+    const cx = W / 2;
+    drawVectorText('ASTEROIDS', cx, H/2 - 40*UI_SCALE, 4*UI_SCALE, { align: 'center', glow: 9 });
+    drawVectorText('ARROWS ROTATE + THRUST', cx, H/2 + 30*UI_SCALE, 1*UI_SCALE, { align: 'center', glow: 4 });
+    drawVectorText('DRAG TO FLY   SHIFT HYPERSPACE', cx, H/2 + 55*UI_SCALE, 1*UI_SCALE, { align: 'center', glow: 4 });
+    if (blinkOn()) {
+      drawVectorText('PRESS ENTER OR TAP TO START', cx, H/2 + 95*UI_SCALE, 1*UI_SCALE, { align: 'center', glow: 4 });
+    }
+  }
+
+  function drawGameOverScreen() {
+    const cx = W / 2;
+    drawVectorText('GAME OVER', cx, H/2 - 10*UI_SCALE, 3.5*UI_SCALE, { align: 'center', glow: 9 });
+    drawVectorText('SCORE:' + score, cx, H/2 + 40*UI_SCALE, 1.3*UI_SCALE, { align: 'center', glow: 5 });
+    if (blinkOn()) {
+      drawVectorText('PRESS ENTER OR TAP TO RESTART', cx, H/2 + 80*UI_SCALE, 1*UI_SCALE, { align: 'center', glow: 4 });
+    }
+  }
+
+  function draw() {
+    ctx.fillStyle = currentBgColor();
+    ctx.fillRect(0, 0, W, H);
+    drawScopeGrid();
+    drawStars();
+    if (state === 'levelstart') {
+      drawWarpStreaks(warpIntensity);
+    }
+
+    if (state === 'playing' || state === 'levelstart') {
+      drawTrail();
+      drawShip();
+      drawDrones();
+      for (const a of asteroids) drawAsteroid(a);
+      drawBullets(bullets);
+      drawBullets(saucerBullets, '255,59,59');
+      drawMissiles();
+      drawParticles();
+      drawPickups();
+      drawSaucer();
+    }
+
+    if (state === 'approaching' || state === 'docked' || state === 'shop') {
+      if (state === 'approaching') drawStationEngineSmoke();
+      drawSpaceStation(station.x, station.y, station.width, station.angle, stationColor(), station.alpha);
+      if (state === 'approaching') drawStationOpeningMarker();
+      drawShip();
+    }
+
+    if (state === 'intro') drawIntroScreen();
+    if (state === 'menu') drawMenuScreen();
+    if (state === 'gameover') drawGameOverScreen();
+
+    drawVignette();
+    drawPlayAreaBoundary();
+
+    if (state === 'playing' || state === 'levelstart' || state === 'approaching') {
+      drawHud();
+    }
+
+    if (state === 'docked' && dockingResultText) {
+      drawVectorText(dockingResultText, 20 * UI_SCALE, H - 30 * UI_SCALE, 1.4 * UI_SCALE,
+        { color: 'rgb(150,235,255)', glow: 6 });
+    }
+
+    if (state === 'shop') {
+      drawShopUI();
+    }
+  }
+
+  // ---------- Main loop ----------
+  function updateHeartbeat() {
+    heartbeatTimer--;
+    if (heartbeatTimer <= 0) {
+      if (heartbeatToggle) sfx.heartbeat1(); else sfx.heartbeat2();
+      heartbeatToggle = !heartbeatToggle;
+
+      const remainingRatio = initialAsteroidCount > 0
+        ? asteroids.length / initialAsteroidCount
+        : 1;
+      let frames = HEARTBEAT_MIN_FRAMES + (HEARTBEAT_MAX_FRAMES - HEARTBEAT_MIN_FRAMES) * remainingRatio;
+      if (saucer) frames *= 0.6; // extra tension while the saucer is around
+      heartbeatTimer = Math.max(HEARTBEAT_MIN_FRAMES, Math.round(frames));
+    }
+  }
+
+  function update() {
+    updateStars();
+    updateBgColor();
+    if (state === 'playing') {
+      updateShip();
+      updateBullets(bullets);
+      updateBullets(saucerBullets);
+      updateAsteroids();
+      resolveDustInteractions();
+      updateParticles();
+      updateTrail();
+      updatePickups();
+      updateMissiles();
+      updateDrones();
+      maybeSpawnSaucer();
+      updateSaucer();
+      checkCollisions();
+      updateHeartbeat();
+      if (activeBuff) {
+        activeBuff.timer--;
+        if (activeBuff.timer <= 0) activeBuff = null;
+      }
+    } else if (state === 'levelstart') {
+      if (thrustSoundOn) { setThrustSound(false); thrustSoundOn = false; }
+
+      const t = Math.min(1, Math.max(0, 1 - stateTimer / LEVEL_TRANSITION_FRAMES));
+      const half = WARP_FADE_START;
+
+      // two phases: (1) fly to center + build up speed/shrink, (2) already
+      // centered, decelerate and let the streaks fade + ship grow back out
+      let posT, decayT;
+      if (t <= half) {
+        posT = smoothstep(t / half);
+        decayT = 0;
+        warpIntensity = posT;
+      } else {
+        posT = 1;
+        decayT = smoothstep((t - half) / (1 - half));
+        warpIntensity = 1 - decayT;
+      }
+
+      if (transitionShip && ship) {
+        ship.x = lerp(transitionShip.startX, W/2, posT);
+        ship.y = lerp(transitionShip.startY, H/2, posT);
+        ship.angle = lerpAngle(transitionShip.startAngle, -Math.PI/2, posT);
+        ship.scale = t <= half
+          ? lerp(1, WARP_SHIP_MIN_SCALE, posT)
+          : lerp(WARP_SHIP_MIN_SCALE, 1, decayT);
+      }
+      updateWarpStreaks(warpIntensity);
+
+      if (!levelSpawnedThisTransition && t >= WARP_ASTEROID_SPAWN_T) {
+        if (!pendingStationVisit) startLevel();
+        levelSpawnedThisTransition = true;
+      }
+      updateAsteroids();
+
+      updateParticles();
+      updateTrail();
+      stateTimer--;
+      if (stateTimer <= 0) {
+        transitionShip = null;
+        warpIntensity = 0;
+        ship.scale = 1;
+        if (pendingStationVisit) {
+          pendingStationVisit = false;
+          state = 'approaching';
+          beginStationApproach();
+        } else {
+          state = 'playing';
+        }
+      }
+    } else if (state === 'approaching') {
+      updateStationArrival();
+      updateStationEnginePush();
+      updateShip();
+      checkStationHullCollision();
+      checkStationDocking();
+      updateStationEngineSmoke();
+    } else if (state === 'docked') {
+      station.angle += STATION_SPIN_RATE * STATION_SPIN_MULTIPLIER;
+      if (stationDockFadeT < 1) {
+        stationDockFadeT = Math.min(1, stationDockFadeT + 0.02);
+      } else {
+        state = 'shop';
+        stationShopFadeT = 0;
+      }
+    } else if (state === 'shop') {
+      station.angle += STATION_SPIN_RATE * STATION_SPIN_MULTIPLIER;
+      station.alpha = Math.max(0, 1 - stationShopFadeT);
+      if (stationShopFadeT < 1) stationShopFadeT = Math.min(1, stationShopFadeT + 0.035);
+      if (stationShopMessageTimer > 0) stationShopMessageTimer--;
+    }
+  }
+
+  function loop() {
+    update();
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  resizeCanvas();
+  loop();
+})();
+</script>
+</body>
+</html>

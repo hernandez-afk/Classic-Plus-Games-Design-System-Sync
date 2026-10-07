@@ -1,0 +1,2529 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Asteroids</title>
+<link rel="stylesheet" href="../kit/tokens.css">
+<link rel="stylesheet" href="../kit/bundle.css">
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; overscroll-behavior: none; background: var(--void); }
+  #game { outline: none; touch-action: none; -webkit-tap-highlight-color: transparent; }
+  .cp-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+</style>
+</head>
+<body>
+<div id="wrap" class="cp-stage-wide">
+  <canvas id="game" class="cp-canvas-wide" aria-label="Asteroids: arcade game field"></canvas>
+</div>
+<div id="say" class="cp-sr" role="status" aria-live="polite"></div>
+<script src="../kit/bundle.js"></script>
+<script>
+(function() {
+  // Classic Plus port: the frame (title, how to play, settings, pause, sound,
+  // game over, restart) comes from ClassicPlus.createShell; the game keeps its
+  // own rules, station and shop. All time runs on shell.tick, so pause and
+  // GAME SPEED reach every clock.
+  const CP = window.ClassicPlus;
+  const COLORS = CP.COLORS;
+  const canvas = document.getElementById('game');
+  const sayEl = document.getElementById('say');
+  // The shell announces start, pause and the result; the game says its own events here.
+  function say(text) { sayEl.textContent = ''; sayEl.textContent = text; }
+  function pad2(n) { return String(n).padStart(2, '0'); }
+  let shell = null; // created at the bottom, once every function exists
+
+  // Currency collected from yellow pickups - resets to zero each game over.
+  let currency = 0;
+  const ctx = canvas.getContext('2d');
+  const wrapEl = document.getElementById('wrap');
+  let W, H;
+
+  function resizeCanvas() {
+    // Cap the play area's absolute size so a big desktop monitor doesn't
+    // just stretch the same fixed-size entities across a vastly larger
+    // canvas (wide layout: up to 1000x800, letterboxed in void).
+    const MAX_CANVAS_W = 1000;
+    const MAX_CANVAS_H = 800;
+    W = canvas.width = Math.max(1, Math.round(Math.min(wrapEl.clientWidth || window.innerWidth, MAX_CANVAS_W)));
+    H = canvas.height = Math.max(1, Math.round(Math.min(wrapEl.clientHeight || window.innerHeight, MAX_CANVAS_H)));
+    recomputeWarpConstants();
+    recomputeUIScale();
+    buildStars();
+    clampEntitiesToBounds();
+  }
+  window.addEventListener('resize', resizeCanvas);
+  window.addEventListener('orientationchange', resizeCanvas);
+  const TWO_PI = Math.PI * 2;
+
+  function rand(min, max) { return Math.random() * (max - min) + min; }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function lerpAngle(a, b, t) {
+    let diff = (b - a) % TWO_PI;
+    if (diff > Math.PI) diff -= TWO_PI;
+    if (diff < -Math.PI) diff += TWO_PI;
+    return a + diff * t;
+  }
+  function smoothstep(t) { return t * t * (3 - 2 * t); }
+  function wrap(obj) {
+    if (obj.x < -obj.r) obj.x = W + obj.r;
+    if (obj.x > W + obj.r) obj.x = -obj.r;
+    if (obj.y < -obj.r) obj.y = H + obj.r;
+    if (obj.y > H + obj.r) obj.y = -obj.r;
+  }
+  function dist(a, b) {
+    const dx = a.x - b.x, dy = a.y - b.y;
+    return Math.sqrt(dx*dx + dy*dy);
+  }
+
+  // ---------- Sound: the kit synth (volume and mute come from the shell) ----------
+  const syn = CP.createSynth();
+  const sfx = Object.assign({}, syn.sfx, {
+    hyperspace: () => syn.beep(300, 0.15, 'sine', 0.1)
+  });
+
+  // ---------- Thrust hiss (filtered noise on the synth's context, scaled by VOLUME, silent when muted) ----------
+  let thrustNodes = null;
+  let thrustSoundOn = false;
+
+  function ensureThrustNodes() {
+    if (thrustNodes) return thrustNodes;
+    const ac = syn.context();
+    if (!ac) return null;
+    try {
+      const bufferSize = ac.sampleRate * 2;
+      const buffer = ac.createBuffer(1, bufferSize, ac.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+
+      const noise = ac.createBufferSource();
+      noise.buffer = buffer;
+      noise.loop = true;
+
+      const filter = ac.createBiquadFilter();
+      filter.type = 'bandpass';
+      filter.frequency.value = 934;
+      filter.Q.value = 0.5;
+
+      const gain = ac.createGain();
+      gain.gain.value = 0;
+
+      noise.connect(filter);
+      filter.connect(gain);
+      gain.connect(ac.destination);
+      noise.start();
+
+      thrustNodes = { noise, filter, gain };
+    } catch (e) {}
+    return thrustNodes;
+  }
+
+  function setThrustSound(on) {
+    const nodes = ensureThrustNodes();
+    if (!nodes) return;
+    const ac = syn.context();
+    const now = ac.currentTime;
+    nodes.gain.gain.cancelScheduledValues(now);
+    nodes.gain.gain.setValueAtTime(nodes.gain.gain.value, now);
+    nodes.filter.frequency.cancelScheduledValues(now);
+    nodes.filter.frequency.setValueAtTime(nodes.filter.frequency.value, now);
+    if (on && !syn.muted) {
+      nodes.gain.gain.linearRampToValueAtTime(0.06 * syn.volume, now + 0.1);
+      nodes.filter.frequency.linearRampToValueAtTime(2002, now + 0.2);
+    } else {
+      nodes.gain.gain.linearRampToValueAtTime(0, now + 0.3);
+      nodes.filter.frequency.linearRampToValueAtTime(667, now + 0.3);
+    }
+  }
+  function stopThrustSound() {
+    if (thrustSoundOn) { setThrustSound(false); thrustSoundOn = false; }
+  }
+  // ---------- Game state ----------
+  let ship, bullets, asteroids, particles, saucer, saucerBullets, trail, pickups;
+  let score = 0, lives = 3, level = 1;
+  let state = 'idle'; // idle (before the first start), playing, levelstart, approaching, docked, shop, gameover
+  let rocksDestroyed = 0;
+  let stateTimer = 0;
+  let extraLifeScore = 10000;
+
+
+  // dust gathering + buffs
+  const DUST_THRESHOLD = 100;
+  const BUFF_DURATION = 480; // 8 seconds at 60fps
+  const MAGNET_RADIUS = 140;
+  const MAGNET_SPEED_THRESHOLD = 2.2;
+  const BUFF_TYPES = ['spread', 'rapid', 'shield'];
+  const BUFF_NAMES = { spread: 'SPREAD SHOT', rapid: 'RAPID FIRE', shield: 'SHIELD' };
+  const SHIELD_RADIUS_MULT = 3.4; // ship.r * this = shield ring radius (doubled from original)
+  let dustCollected = 0;
+  let activeBuff = null; // { type, timer }
+  let nextBuffType = null; // queued up while dust collects toward the next activation
+
+  // heartbeat pacing
+  const HEARTBEAT_MAX_FRAMES = 55; // slowest pulse (level just started)
+  const HEARTBEAT_MIN_FRAMES = 14; // fastest pulse (almost cleared)
+  let initialAsteroidCount = 0;
+  let heartbeatTimer = HEARTBEAT_MAX_FRAMES;
+  let heartbeatToggle = false;
+
+  // level-clear hyperspace transition
+  const LEVEL_TRANSITION_FRAMES = 240;
+  const WARP_FADE_START = 0.50; // fraction of transition duration where fly-in ends and fade-out begins
+  const WARP_ASTEROID_SPAWN_T = 0.88; // spawn the new wave once streaks have mostly faded out
+  const WARP_SHIP_MIN_SCALE = 0.20;
+  const ASTEROID_FADE_IN_FRAMES = 60;
+  let WARP_ORIGIN_X = 0;
+  let WARP_ORIGIN_Y = 0; // recomputed on resize - the ship's known end position (screen center)
+  let WARP_CENTER_MASK_RADIUS = 0; // no streaks at all inside this radius
+  let WARP_OUTER_MIN = 0;
+  let WARP_OUTER_MAX = 0; // out toward the corners
+  function recomputeWarpConstants() {
+    WARP_ORIGIN_X = W / 2;
+    WARP_ORIGIN_Y = H / 2;
+    WARP_CENTER_MASK_RADIUS = Math.min(W, H) * 0.20;
+    WARP_OUTER_MIN = WARP_CENTER_MASK_RADIUS * 1.3;
+    WARP_OUTER_MAX = Math.sqrt(W*W + H*H) / 2 * 1.05;
+  }
+
+  // HUD/menu text was sized for the game's original 900x700 reference canvas.
+  // Now that the canvas matches the real screen (often much smaller in
+  // absolute pixels on a phone), scale text/margins down to match, so it
+  // doesn't look oversized on small screens or tiny on large ones.
+  // Global glow reduction: every ctx.shadowBlur value in the game is
+  // multiplied by this, so overall glow intensity can be tuned in one
+  // place rather than hunting down dozens of individual values.
+  const GLOW_SCALE = 0.55;
+  let UI_SCALE = 1;
+  // Asteroid density scale: a fixed asteroid count feels sparser the more
+  // screen area there is to spread across, and denser (more frantic) the
+  // less there is - especially along whichever axis is shortest. Scaling
+  // count by actual screen area (relative to the ~700x700 reference this
+  // game was tuned at) keeps density, and therefore intensity, consistent
+  // across very different window shapes/sizes instead of just leaving a
+  // wide short window naturally more cramped than a tall narrow one.
+  let GAMEPLAY_SCALE = 1;
+  function recomputeUIScale() {
+    UI_SCALE = CP.uiScale(W, H);
+    GAMEPLAY_SCALE = CP.gameplayScale(W, H);
+  }
+  const WARP_SPAWN_RATE = 13.2; // streaks spawned per frame at full intensity
+  const WARP_GROW_FRAMES = 5;   // snaps to full length almost immediately
+  const WARP_HOLD_FRAMES = 7;   // brief hold at full brightness/length
+  const WARP_SHRINK_FRAMES = 18; // then contracts back to a point and fades
+  const WARP_STREAK_LIFE = WARP_GROW_FRAMES + WARP_HOLD_FRAMES + WARP_SHRINK_FRAMES;
+  let levelSpawnedThisTransition = false;
+  let transitionShip = null; // { startX, startY, startAngle }
+  let warpIntensity = 0;
+  let warpStreaks = [];
+  let warpSpawnAccumulator = 0;
+
+  // ---------- Space station visits ----------
+  // Every WAVES_UNTIL_STATION cleared waves, instead of a new asteroid field
+  // the warp leads to the space station: fly in, dock, then spend currency
+  // in the upgrade shop before the next wave begins.
+  const WAVES_UNTIL_STATION = 4;
+  let wavesSinceStation = 0;
+  let pendingStationVisit = false;
+
+  const STATION_SPIN_RATE = 0.0018;
+  const STATION_SPIN_MULTIPLIER = 1;
+  const ENGINE_PUSH_RADIUS_RATIO = 0.55;
+  const ENGINE_PUSH_FORCE = 0.06;
+  // The 4 corner engine shapes (Engine1/path60/Engine4/path62) at the
+  // concave inner corners of the cross, where adjacent arms meet - computed
+  // from each shape's centroid in the updated station SVG.
+  const ENGINE_LOCAL_OFFSETS = [
+    { x: -0.34779, y:  0.34778 }, // "Engine1" (bottom-left)
+    { x: -0.34779, y: -0.34778 }, // "path60"  (top-left)
+    { x:  0.34772, y:  0.34778 }, // "Engine4" (bottom-right)
+    { x:  0.34772, y: -0.34778 }  // "path62"  (top-right)
+  ];
+  // Landing pads: the new station is a symmetric cross, so all 4 arm tips
+  // are identical pads. Each pad is the outer half of its arm - from the
+  // hub boundary out to the tip - defined here as ratios of the station's
+  // own width (both come out to clean 0.25/0.5 given the source SVG's
+  // exact 2:1 proportions).
+  const PAD_HALF_WIDTH_RATIO = 0.25;   // half the arm's thickness
+  const PAD_OUTER_DIST_RATIO = 0.5;    // distance from center to the arm tip
+  const PAD_DEPTH_PX = 75;             // flat pixel depth (tuned previously, kept as-is regardless of station size)
+  // 4 directions in the station's own local space, each as an outward unit
+  // vector plus its perpendicular (for measuring how centered the ship is
+  // across the opening).
+  const STATION_PAD_DIRECTIONS = [
+    { ox: 1, oy: 0, px: 0, py: 1 },   // right
+    { ox: -1, oy: 0, px: 0, py: 1 },  // left
+    { ox: 0, oy: 1, px: 1, py: 0 },   // bottom
+    { ox: 0, oy: -1, px: 1, py: 0 }   // top
+  ];
+  // Collision hull: the union of the two body rects (a plus shape), so
+  // being inside means being within the vertical bar's width OR the
+  // horizontal bar's width - this matches STATION_BODY_RECTS almost
+  // exactly, just expressed as ratios for the collision check.
+  const STATION_HULL_HALF_THICKNESS_RATIO = 0.25;
+
+  let station = null; // { x, y, width, alpha, angle, parked, arrival }
+  let stationEngineSmoke = [];
+  let stationDockFadeT = 0;
+  let stationShopFadeT = 0;
+  let stationShopMessage = '';
+  let stationShopMessageTimer = 0;
+  let stationSelectedCard = 0;
+  let dockingResultText = '';
+
+
+  function newShip() {
+    return {
+      x: W/2, y: H/2,
+      vx: 0, vy: 0,
+      angle: -Math.PI/2,
+      r: 14,
+      thrusting: false,
+      canShoot: true,
+      shootCooldown: 0,
+      invincible: 120,
+      blinkOn: true,
+      hyperCooldown: 0,
+      scale: 1
+    };
+  }
+
+  function resetGame() {
+    score = 0;
+    lives = 3;
+    level = 1;
+    currency = 0;
+    sky.hue = sky.start;
+    rocksDestroyed = 0;
+    ship = newShip();
+    bullets = [];
+    saucerBullets = [];
+    particles = [];
+    trail = [];
+    pickups = [];
+    saucer = null;
+    extraLifeScore = 10000;
+    dustCollected = 0;
+    activeBuff = null;
+    nextBuffType = pickRandomBuffType();
+    wavesSinceStation = 0;
+    pendingStationVisit = false;
+    station = null;
+    stationEngineSmoke = [];
+    stationDockFadeT = 0;
+    stationShopFadeT = 0;
+    stationSelectedCard = 0;
+    stationShopPage = 0;
+    stationShopLine = '';
+    dockingResultText = '';
+    for (const u of UPGRADES) {
+      if (u.type === 'onetime') u.owned = false;
+      else { u.level = 0; u.purchasedThisVisit = false; }
+    }
+    missiles = [];
+    totalShotsFired = 0;
+    droneBaseAngle = 0;
+    droneCooldowns = [0, 0, 0];
+    startLevel();
+  }
+
+  function startLevel() {
+    asteroids = [];
+    const num = Math.max(1, Math.round((3 + level) * GAMEPLAY_SCALE));
+    for (let i = 0; i < num; i++) {
+      spawnAsteroid('large');
+    }
+    initialAsteroidCount = asteroids.length;
+    heartbeatTimer = HEARTBEAT_MAX_FRAMES;
+  }
+
+  function spawnAsteroid(size, x, y) {
+    let r;
+    if (size === 'large') r = 45;
+    else if (size === 'medium') r = 25;
+    else r = 13;
+
+    if (x === undefined) {
+      // spawn away from ship
+      do {
+        x = rand(0, W);
+        y = rand(0, H);
+      } while (ship && dist({x,y}, ship) < 150);
+    }
+
+    const angle = rand(0, TWO_PI);
+    const speedBase = size === 'large' ? 1 : size === 'medium' ? 1.6 : 2.4;
+    const speed = rand(speedBase*0.5, speedBase);
+
+    const verts = [];
+    const vertCount = Math.floor(rand(8, 13));
+    for (let i = 0; i < vertCount; i++) {
+      verts.push(rand(0.75, 1.25));
+    }
+
+    asteroids.push({
+      x, y, r, size,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      angle: rand(0, TWO_PI),
+      spin: rand(-0.02, 0.02),
+      verts,
+      spawnTimer: 0
+    });
+  }
+
+  function breakAsteroid(a) {
+    const idx = asteroids.indexOf(a);
+    if (idx >= 0) asteroids.splice(idx, 1);
+    rocksDestroyed++;
+
+    if (a.size === 'large') {
+      score += 20; sfx.bangLarge();
+      for (let i = 0; i < 2; i++) spawnAsteroid('medium', a.x, a.y);
+    } else if (a.size === 'medium') {
+      score += 50; sfx.bangMedium();
+      for (let i = 0; i < 2; i++) spawnAsteroid('small', a.x, a.y);
+    } else {
+      score += 100; sfx.bangSmall();
+    }
+    spawnDebris(a.x, a.y, 16);
+    maybeSpawnPickup(a.x, a.y);
+    checkExtraLife();
+    updateHud();
+
+    checkLevelComplete();
+  }
+
+  function checkLevelComplete() {
+    if (state === 'playing' && asteroids.length === 0 && !saucer) {
+      state = 'levelstart';
+      stateTimer = LEVEL_TRANSITION_FRAMES;
+      level++;
+      transitionShip = { startX: ship.x, startY: ship.y, startAngle: ship.angle };
+      ship.vx = 0;
+      ship.vy = 0;
+      warpIntensity = 0;
+      particles = [];
+      trail = [];
+      levelSpawnedThisTransition = false;
+      activeBuff = null;
+      warpStreaks = [];
+      warpSpawnAccumulator = 3;
+      bullets = [];
+      saucerBullets = [];
+      pickups = [];
+      missiles = [];
+
+      say('Wave ' + pad2(level - 1) + ' clear.');
+      wavesSinceStation++;
+      if (wavesSinceStation >= WAVES_UNTIL_STATION) {
+        wavesSinceStation = 0;
+        pendingStationVisit = true;
+      } else {
+        pendingStationVisit = false;
+      }
+    }
+  }
+
+  function checkExtraLife() {
+    if (score >= extraLifeScore) {
+      lives++;
+      extraLifeScore += 10000;
+      sfx.extraLife();
+      say('Extra ship. ' + lives + ' ships.');
+      updateHud();
+    }
+  }
+
+  const MAX_PARTICLES = 500;
+
+  function spawnDebris(x, y, count) {
+    for (let i = 0; i < count; i++) {
+      const angle = rand(0, TWO_PI);
+      const speed = rand(1, 4.5);
+      const life = rand(360, 700); // dust lingers for a long time
+      particles.push({
+        x, y,
+        vx: Math.cos(angle)*speed,
+        vy: Math.sin(angle)*speed,
+        life: life,
+        maxLife: life,
+        size: rand(1, 3),
+        r: 2.5
+      });
+    }
+    // keep the total bounded so long-lived dust doesn't accumulate forever
+    if (particles.length > MAX_PARTICLES) {
+      particles.splice(0, particles.length - MAX_PARTICLES);
+    }
+  }
+
+  function updateHud() {
+    // HUD is drawn fresh from game state each frame in drawHud(); nothing to sync here.
+  }
+
+  // ---------- Saucer ----------
+  let saucerTimer = 300;
+  function maybeSpawnSaucer() {
+    if (saucer) return;
+    saucerTimer--;
+    if (saucerTimer <= 0) {
+      const fromLeft = Math.random() < 0.5;
+      saucer = {
+        x: fromLeft ? -30 : W + 30,
+        y: rand(80, H - 80),
+        vx: fromLeft ? rand(1.5, 2.5) : -rand(1.5, 2.5),
+        vy: 0,
+        r: 32,
+        shootTimer: 60,
+        changeTimer: 90,
+        large: Math.random() < 0.5
+      };
+      saucerTimer = rand(600, 1200);
+    }
+  }
+
+  function updateSaucer() {
+    if (!saucer) return;
+    saucer.x += saucer.vx;
+    saucer.changeTimer--;
+    if (saucer.changeTimer <= 0) {
+      saucer.vy = rand(-1.5, 1.5);
+      saucer.changeTimer = rand(40, 90);
+    }
+    saucer.y += saucer.vy;
+    if (saucer.y < 30) saucer.y = 30;
+    if (saucer.y > H - 30) saucer.y = H - 30;
+
+    saucer.shootTimer--;
+    if (saucer.shootTimer <= 0) {
+      saucer.shootTimer = rand(60, 100);
+      sfx.saucer();
+      let angle;
+      if (saucer.large) {
+        angle = rand(0, TWO_PI);
+      } else {
+        angle = Math.atan2(ship.y - saucer.y, ship.x - saucer.x) + rand(-0.2, 0.2);
+      }
+      saucerBullets.push({
+        x: saucer.x, y: saucer.y,
+        vx: Math.cos(angle) * 5,
+        vy: Math.sin(angle) * 5,
+        life: 90
+      });
+    }
+
+    if (saucer.x < -50 || saucer.x > W + 50) {
+      saucer = null;
+      checkLevelComplete();
+    }
+  }
+
+  // ---------- Input ----------
+  // Flight keys are shell actions (rebindable, HELD KEYS can make them
+  // tap-on/tap-off). The station shop is a menu: arrows, Enter and Space, plus
+  // the player's own turn / thrust / fire keys. This listener is registered
+  // before the shell's, so in the shop it sees the key first and keeps it.
+  function shopKeyIntent(key) {
+    const name = CP.keyName(key);
+    if (key === 'arrowleft' || name === shell.keyFor('left')) return 'left';
+    if (key === 'arrowright' || name === shell.keyFor('right')) return 'right';
+    if (key === 'arrowup' || name === shell.keyFor('thrust')) return 'up';
+    if (key === 'arrowdown' || name === shell.keyFor('hyper')) return 'down';
+    if (key === 'enter' || key === ' ' || name === shell.keyFor('fire')) return 'select';
+    return null;
+  }
+  window.addEventListener('keydown', (e) => {
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (!shell || !shell.isPlaying() || state !== 'shop') return;
+    const intent = shopKeyIntent((e.key || '').toLowerCase());
+    if (!intent) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if (intent === 'select' && e.repeat) return;
+    shopInput();
+    shopNavigate(intent);
+  }, true);
+  // Clicking or tapping the canvas keeps keyboard focus on it (the page may sit in an iframe).
+  canvas.addEventListener('pointerdown', () => canvas.focus({ preventScroll: true }), true);
+
+  // With MESSAGES on STAY, a shop message holds until the player's next key or tap.
+  function shopInput() {
+    if (shell.messagesStay()) stationShopMessageTimer = 0;
+  }
+
+  function shopNavigate(intent) {
+    const pageItems = currentPageUpgrades();
+    const cols = 2, rows = 2;
+    const hasPages = totalShopPages() > 1;
+    const LEAVE_INDEX = pageItems.length; // slot right after this page's items
+    const PREV_INDEX = pageItems.length + 1;
+    const NEXT_INDEX = pageItems.length + 2;
+    const last = pageItems.length - 1;
+
+    if (intent === 'select') {
+      if (stationSelectedCard === LEAVE_INDEX) leaveStationShop();
+      else if (stationSelectedCard === PREV_INDEX) changeShopPage(-1);
+      else if (stationSelectedCard === NEXT_INDEX) changeShopPage(1);
+      else if (pageItems[stationSelectedCard]) purchaseUpgrade(pageItems[stationSelectedCard]);
+      return;
+    }
+    if (stationSelectedCard === LEAVE_INDEX) {
+      // only up/down are meaningful from the Leave slot (it spans the row)
+      if (intent === 'up') stationSelectedCard = Math.min(last, (rows - 1) * cols);
+      else if (intent === 'down') stationSelectedCard = 0;
+      sayShopSelection();
+      return;
+    }
+    if (stationSelectedCard === PREV_INDEX) {
+      if (intent === 'right') stationSelectedCard = 0;
+      else if (intent === 'down') stationSelectedCard = LEAVE_INDEX;
+      sayShopSelection();
+      return;
+    }
+    if (stationSelectedCard === NEXT_INDEX) {
+      if (intent === 'left') stationSelectedCard = Math.min(last, 1);
+      else if (intent === 'down') stationSelectedCard = LEAVE_INDEX;
+      sayShopSelection();
+      return;
+    }
+
+    let col = stationSelectedCard % cols;
+    let row = Math.floor(stationSelectedCard / cols);
+    if (intent === 'left') {
+      if (col === 0 && hasPages) { stationSelectedCard = PREV_INDEX; sayShopSelection(); return; }
+      col = (col - 1 + cols) % cols;
+    } else if (intent === 'right') {
+      if (col === cols - 1 && hasPages) { stationSelectedCard = NEXT_INDEX; sayShopSelection(); return; }
+      col = (col + 1) % cols;
+    } else if (intent === 'up') {
+      row = (row - 1 + rows) % rows;
+    } else if (intent === 'down') {
+      if (row === rows - 1) { stationSelectedCard = LEAVE_INDEX; sayShopSelection(); return; }
+      row++;
+    }
+    stationSelectedCard = Math.min(last, row * cols + col);
+    sayShopSelection();
+  }
+
+  function sayShopSelection() {
+    const pageItems = currentPageUpgrades();
+    const i = stationSelectedCard;
+    if (i === pageItems.length) { say('Leave.'); return; }
+    if (i === pageItems.length + 1) { say('Previous page.'); return; }
+    if (i === pageItems.length + 2) { say('Next page.'); return; }
+    const u = pageItems[i];
+    if (!u) return;
+    const v = upgradeView(u);
+    say(v.name.toLowerCase() + ', ' + v.desc.toLowerCase() + ', ' + (v.cost === null ? v.lockLabel.toLowerCase() : 'costs ' + v.cost + ', you have ' + currency) + '.');
+  }
+
+  // Drag-anywhere virtual joystick: wherever a finger first touches down
+  // becomes the neutral center. Horizontal offset from that point steers
+  // (analog - a slight drag turns slightly, a full drag turns at full
+  // speed); dragging up thrusts (also analog); dragging down past a
+  // threshold fires. No visible buttons - the whole canvas is the control
+  // surface, and multiple simultaneous touches are supported.
+  const DRAG_DEADZONE = 6;          // px of slack before any input registers
+  const DRAG_TURN_RANGE = 55;       // px of horizontal drag for full turn speed
+  const DRAG_THRUST_RANGE = 28;     // px dragged up for full thrust
+  const DRAG_FIRE_THRESHOLD = 33;   // px dragged down to trigger fire (only used if USE_FIRE_BUTTON is false)
+  // A dedicated on-screen fire button (bottom-left circle): any touch
+  // currently positioned inside it fires, for as long as it's held,
+  // regardless of how many other fingers are on screen doing other things.
+  // That finger is purely for firing and doesn't also drive steering/thrust.
+  // Set to false to revert to the original slide-down-to-fire gesture.
+  const USE_FIRE_BUTTON = true;
+  const dragPointers = new Map(); // pointerId -> {startX, startY, x, y, canvasX, canvasY}
+  let dragTurnInput = 0;    // -1..1, analog
+  let dragThrustInput = 0;  // 0..1, analog
+  let dragFireActive = false;
+
+  function clamp01(v) { return Math.max(0, Math.min(1, v)); }
+
+  function canvasLocalXY(e) {
+    // Raw screen pixels, not canvas-space: these coordinates are only ever
+    // used as deltas (distance dragged), never as absolute in-game
+    // positions, so keeping them in real screen pixels means the drag feel
+    // stays consistent regardless of how much the canvas is scaled down
+    // (e.g. a small portrait-mode display).
+    const rect = canvas.getBoundingClientRect();
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  }
+  function canvasSpaceXY(e) {
+    // Absolute canvas-space coordinates (matching W/H), for UI hit-testing
+    // like shop cards, where actual position (not just delta) matters.
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width, scaleY = canvas.height / rect.height;
+    return { x: (e.clientX - rect.left) * scaleX, y: (e.clientY - rect.top) * scaleY };
+  }
+
+  function isInFireButton(canvasX, canvasY) {
+    const g = fireGeometry();
+    return Math.hypot(canvasX - g.cx, canvasY - g.cy) <= g.radius;
+  }
+
+  function recomputeDragInputs() {
+    dragTurnInput = 0;
+    dragThrustInput = 0;
+    dragFireActive = false;
+    for (const p of dragPointers.values()) {
+      if (USE_FIRE_BUTTON && isTouchDevice) {
+        if (isInFireButton(p.canvasX, p.canvasY)) {
+          dragFireActive = true;
+          continue; // dedicated fire finger - doesn't also drive steering
+        }
+      }
+
+      const dx = p.x - p.startX;
+      const dy = p.y - p.startY;
+
+      if (Math.abs(dx) > DRAG_DEADZONE) {
+        const magnitude = clamp01((Math.abs(dx) - DRAG_DEADZONE) / (DRAG_TURN_RANGE - DRAG_DEADZONE) * shell.steering());
+        const signed = magnitude * Math.sign(dx);
+        if (Math.abs(signed) > Math.abs(dragTurnInput)) dragTurnInput = signed;
+      }
+      if (dy < -DRAG_DEADZONE) {
+        const upDist = -dy;
+        const magnitude = clamp01((upDist - DRAG_DEADZONE) / (DRAG_THRUST_RANGE - DRAG_DEADZONE));
+        if (magnitude > dragThrustInput) dragThrustInput = magnitude;
+      }
+      if (!USE_FIRE_BUTTON && dy > DRAG_FIRE_THRESHOLD) dragFireActive = true;
+    }
+  }
+
+  // Static guess (device capability) as a sensible default before any real
+  // input is observed; refined below by actual pointerType as the player
+  // interacts, since capability alone is unreliable on hybrid devices
+  // (e.g. a touchscreen laptop driven by mouse would still report as
+  // touch-capable).
+  let isTouchDevice = window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0;
+
+  canvas.addEventListener('pointerdown', (e) => {
+    if (e.pointerType === 'touch') isTouchDevice = true;
+    else if (e.pointerType === 'mouse') isTouchDevice = false;
+    // The shell's capture listener has already taken taps on its own buttons and screens.
+    if (!shell.isPlaying()) return;
+    if (state === 'shop') {
+      shopInput();
+      const p = canvasSpaceXY(e);
+      handleShopClick(p.x, p.y);
+      return;
+    }
+    if (state !== 'playing' && state !== 'approaching') return;
+    canvas.setPointerCapture(e.pointerId);
+    const pos = canvasLocalXY(e);
+    const cxy = canvasSpaceXY(e);
+    dragPointers.set(e.pointerId, { startX: pos.x, startY: pos.y, x: pos.x, y: pos.y, canvasX: cxy.x, canvasY: cxy.y });
+    recomputeDragInputs();
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    const p = dragPointers.get(e.pointerId);
+    if (!p || !shell.isPlaying()) return;
+    const pos = canvasLocalXY(e);
+    const cxy = canvasSpaceXY(e);
+    p.x = pos.x;
+    p.y = pos.y;
+    p.canvasX = cxy.x;
+    p.canvasY = cxy.y;
+    recomputeDragInputs();
+  });
+  function releaseDragPointer(e) {
+    dragPointers.delete(e.pointerId);
+    recomputeDragInputs();
+  }
+  canvas.addEventListener('pointerup', releaseDragPointer);
+  canvas.addEventListener('pointercancel', releaseDragPointer);
+  canvas.addEventListener('pointerleave', releaseDragPointer);
+
+  // ---------- Update ----------
+  // Base cooldowns in frames (60fps): normal fire is now deliberately slow,
+  // so Fire Rate upgrades and the Rapid Fire buff both feel like a real,
+  // noticeable change rather than a marginal tweak.
+  const SHIP_BASE_COOLDOWN = 18;
+  const SHIP_RAPID_COOLDOWN = 3;
+
+  function fireBullet() {
+    const spreadActive = activeBuff && activeBuff.type === 'spread';
+    const rapidActive = activeBuff && activeBuff.type === 'rapid';
+    const bulletsPerShot = spreadActive ? 3 : 1;
+    const baseCooldown = rapidActive ? SHIP_RAPID_COOLDOWN : SHIP_BASE_COOLDOWN;
+    const effectiveCooldown = Math.max(1, Math.round(baseCooldown * fireRateMultiplier()));
+    const bulletLife = 60;
+    // Steady-state bullet count at the CURRENT fire rate, plus headroom, so
+    // the cap never binds during normal sustained fire (previously a flat
+    // number that could exactly match, or fall below, the steady-state
+    // count once Fire Rate upgrades sped things up further).
+    const steadyState = Math.ceil((bulletLife / effectiveCooldown) * bulletsPerShot);
+    const maxBullets = steadyState + 10;
+    if (bullets.length >= maxBullets) return;
+
+    const buffed = !!activeBuff;
+    const angles = spreadActive ? [-0.22, 0, 0.22] : [0];
+    for (const offset of angles) {
+      const a = ship.angle + offset;
+      const tipX = ship.x + Math.cos(a) * ship.r;
+      const tipY = ship.y + Math.sin(a) * ship.r;
+      bullets.push({
+        x: tipX, y: tipY,
+        vx: Math.cos(a) * 8 + ship.vx,
+        vy: Math.sin(a) * 8 + ship.vy,
+        life: bulletLife,
+        buffed: buffed
+      });
+    }
+    sfx.fire();
+  }
+
+  function killShip() {
+    sfx.explodeShip();
+    spawnDebris(ship.x, ship.y, 40);
+    lives--;
+    updateHud();
+    stopThrustSound();
+    if (lives <= 0) {
+      state = 'gameover';
+      stateTimer = 0;
+      shell.setScore(score);
+      shell.lose({ title: 'GAME OVER', lines: ['WAVE ' + pad2(level), rocksDestroyed + ' ROCKS DESTROYED'] });
+    } else {
+      ship = newShip();
+      say('Ship lost. ' + lives + (lives === 1 ? ' ship' : ' ships') + ' left.');
+    }
+  }
+
+  function updateShip() {
+    let keyboardTurn = 0;
+    if (shell.isDown('left')) keyboardTurn -= 1;
+    if (shell.isDown('right')) keyboardTurn += 1;
+    keyboardTurn *= shell.steering();
+    const turnInput = Math.abs(keyboardTurn) >= Math.abs(dragTurnInput) ? keyboardTurn : dragTurnInput;
+    ship.angle += turnInput * 0.06;
+
+    const keyboardThrust = shell.isDown('thrust') ? 1 : 0;
+    const thrustInput = Math.max(keyboardThrust, dragThrustInput);
+    ship.thrusting = thrustInput > 0;
+
+    if (ship.thrusting && !thrustSoundOn && !syn.muted) {
+      setThrustSound(true);
+      thrustSoundOn = true;
+    } else if (!ship.thrusting && thrustSoundOn) {
+      setThrustSound(false);
+      thrustSoundOn = false;
+    }
+
+    if (ship.thrusting) {
+      const thrustAccel = 0.12 * thrustMultiplier();
+      ship.vx += Math.cos(ship.angle) * thrustAccel * thrustInput;
+      ship.vy += Math.sin(ship.angle) * thrustAccel * thrustInput;
+
+      // emit glowing exhaust particles from the engine, spread in a small cone
+      const backX = ship.x - Math.cos(ship.angle) * ship.r * 0.6;
+      const backY = ship.y - Math.sin(ship.angle) * ship.r * 0.6;
+      for (let i = 0; i < 2; i++) {
+        const spread = rand(-0.12, 0.12);
+        const emitAngle = ship.angle + Math.PI + spread;
+        const speed = rand(0.8, 1.6) * thrustInput;
+        trail.push({
+          x: backX, y: backY,
+          vx: Math.cos(emitAngle) * speed + ship.vx * 0.4,
+          vy: Math.sin(emitAngle) * speed + ship.vy * 0.4,
+          life: rand(45, 70),
+          maxLife: 70,
+          size: rand(1.5, 3)
+        });
+      }
+    }
+    ship.vx *= 0.99;
+    ship.vy *= 0.99;
+
+    const speed = Math.sqrt(ship.vx*ship.vx + ship.vy*ship.vy);
+    const maxSpeed = maxSpeedValue();
+    if (speed > maxSpeed) {
+      ship.vx = ship.vx / speed * maxSpeed;
+      ship.vy = ship.vy / speed * maxSpeed;
+    }
+
+    ship.x += ship.vx;
+    ship.y += ship.vy;
+    wrap(ship);
+
+    if (ship.shootCooldown > 0) ship.shootCooldown--;
+    if ((shell.isDown('fire') || dragFireActive) && ship.shootCooldown <= 0) {
+      fireBullet();
+      const baseCooldown = (activeBuff && activeBuff.type === 'rapid') ? SHIP_RAPID_COOLDOWN : SHIP_BASE_COOLDOWN;
+      const fireRateMult = fireRateMultiplier();
+      ship.shootCooldown = Math.max(1, Math.round(baseCooldown * fireRateMult));
+      totalShotsFired++;
+      if (upgradeIsOwned('homing') && totalShotsFired % HOMING_MISSILE_EVERY_T1 === 0) {
+        launchHomingMissile();
+      }
+      if (upgradeIsOwned('homing2') && totalShotsFired % HOMING_MISSILE_EVERY_T2 === 0) {
+        launchHomingMissile();
+      }
+      if (upgradeIsOwned('homing3') && totalShotsFired % HOMING_MISSILE_EVERY_T3 === 0) {
+        launchHomingMissile();
+      }
+    }
+
+    if (ship.hyperCooldown > 0) ship.hyperCooldown--; // hyperspace itself is the 'hyper' action
+
+    if (ship.invincible > 0) {
+      ship.invincible--;
+      ship.blinkOn = Math.floor(ship.invincible / 10) % 2 === 0;
+    } else {
+      ship.blinkOn = true;
+    }
+  }
+
+  function updateBullets(arr) {
+    for (let i = arr.length - 1; i >= 0; i--) {
+      const b = arr[i];
+      b.x += b.vx; b.y += b.vy;
+      if (b.fadeOut !== undefined) {
+        b.fadeOut--;
+        if (b.fadeOut <= 0) { arr.splice(i, 1); continue; }
+        continue;
+      }
+      b.life--;
+      if (b.life <= 0) { arr.splice(i, 1); continue; }
+      if (b.x < 0 || b.x > W || b.y < 0 || b.y > H) { arr.splice(i, 1); }
+    }
+  }
+
+  function updateAsteroids() {
+    for (const a of asteroids) {
+      a.x += a.vx; a.y += a.vy;
+      a.angle += a.spin;
+      a.spawnTimer++;
+      wrap(a);
+    }
+  }
+
+  function updateParticles() {
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      p.x += p.vx; p.y += p.vy;
+      p.vx *= 0.96; p.vy *= 0.96;
+      p.life--;
+      wrap(p);
+      if (p.life <= 0) particles.splice(i, 1);
+    }
+  }
+
+  function collectDust() {
+    dustCollected++;
+    sfx.collect();
+    if (dustCollected >= DUST_THRESHOLD) {
+      dustCollected = 0;
+      triggerBuff();
+    }
+  }
+
+  function pickRandomBuffType() {
+    return BUFF_TYPES[Math.floor(rand(0, BUFF_TYPES.length))];
+  }
+
+  function triggerBuff() {
+    if (!nextBuffType) nextBuffType = pickRandomBuffType();
+    activeBuff = { type: nextBuffType, timer: Math.round(BUFF_DURATION * buffDurationMultiplier()) };
+    sfx.buffUp();
+    say(BUFF_NAMES[activeBuff.type].toLowerCase() + ' on.');
+    nextBuffType = pickRandomBuffType();
+  }
+
+  // ---------- Pickups ----------
+  // A rare bonus drop from destroyed asteroids/saucers: a chunky yellow
+  // square, like a pong ball, distinct from the cyan dust particles.
+  // Collecting one adds to the persistent currency, not score.
+  const PICKUP_SPAWN_CHANCE = 0.08;
+  const PICKUP_SIZE = 9;
+  const PICKUP_LIFE = 360; // ~6 seconds before it despawns if uncollected
+  const PICKUP_CURRENCY_VALUE_BASE = 10;
+  const PICKUP_MAGNET_RADIUS = 130;
+  const PICKUP_COLOR = '255,225,60';
+
+  function maybeSpawnPickup(x, y) {
+    if (Math.random() >= PICKUP_SPAWN_CHANCE) return;
+    const angle = rand(0, TWO_PI);
+    const speed = rand(0.3, 1);
+    pickups.push({
+      x, y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      r: PICKUP_SIZE / 2,
+      life: PICKUP_LIFE
+    });
+  }
+
+  function updatePickups() {
+    for (let i = pickups.length - 1; i >= 0; i--) {
+      const p = pickups[i];
+
+      if (ship) {
+        const dx = ship.x - p.x, dy = ship.y - p.y;
+        const distance = Math.sqrt(dx*dx + dy*dy) || 0.01;
+        const effectiveRadius = PICKUP_MAGNET_RADIUS * magnetRadiusMultiplier();
+        if (distance < effectiveRadius) {
+          const pull = 0.5 * (1 - distance / effectiveRadius);
+          p.vx += (dx / distance) * pull;
+          p.vy += (dy / distance) * pull;
+        }
+      }
+
+      p.x += p.vx;
+      p.y += p.vy;
+      p.life--;
+      wrap(p);
+      if (p.life <= 0) {
+        pickups.splice(i, 1);
+        continue;
+      }
+      if (ship && dist(ship, p) < ship.r + p.r) {
+        pickups.splice(i, 1);
+        currency += pickupValue();
+        sfx.pickup();
+        spawnDebris(p.x, p.y, 10);
+      }
+    }
+  }
+
+  // ---------- Upgrade shop ----------
+  // Stackable upgrades can be bought again on a LATER visit (cost rises each
+  // level), but only once per single visit. One-time upgrades (unlocks) can
+  // only ever be bought once, period.
+  const UPGRADES = [
+    { id: 'firerate', name: 'FIRE RATE', type: 'stackable',
+      baseCost: 60, costGrowth: 1.35, maxLevel: 8, level: 0, purchasedThisVisit: false,
+      icon: 'fireRate', describe: (u) => '+' + Math.round((1 - Math.pow(0.9, u.level)) * 100) + '% (LV ' + u.level + ')' },
+    { id: 'extralife', name: 'EXTRA LIFE', type: 'stackable',
+      baseCost: 90, costGrowth: 1.25, maxLevel: 20, level: 0, purchasedThisVisit: false,
+      icon: 'extraLife', describe: () => '+1 LIFE' },
+    { id: 'thrustpower', name: 'THRUST POWER', type: 'stackable',
+      baseCost: 50, costGrowth: 1.3, maxLevel: 8, level: 0, purchasedThisVisit: false,
+      icon: 'thrust', describe: (u) => '+' + Math.round((Math.pow(1.15, u.level) - 1) * 100) + '% ACCEL' },
+    { id: 'maxspeed', name: 'MAX SPEED', type: 'stackable',
+      baseCost: 55, costGrowth: 1.3, maxLevel: 8, level: 0, purchasedThisVisit: false,
+      icon: 'maxSpeed', describe: (u) => '+' + Math.round((Math.pow(1.1, u.level) - 1) * 100) + '% TOP SPEED' },
+    { id: 'buffduration', name: 'BUFF DURATION', type: 'stackable',
+      baseCost: 70, costGrowth: 1.3, maxLevel: 6, level: 0, purchasedThisVisit: false,
+      icon: 'buffDuration', describe: (u) => '+' + Math.round((Math.pow(1.2, u.level) - 1) * 100) + '% LENGTH' },
+    { id: 'magnetrange', name: 'DUST MAGNET', type: 'stackable',
+      baseCost: 45, costGrowth: 1.3, maxLevel: 8, level: 0, purchasedThisVisit: false,
+      icon: 'magnet', describe: (u) => '+' + Math.round((Math.pow(1.15, u.level) - 1) * 100) + '% RANGE' },
+    { id: 'dustvalue', name: 'DUST VALUE', type: 'stackable',
+      baseCost: 65, costGrowth: 1.3, maxLevel: 8, level: 0, purchasedThisVisit: false,
+      icon: 'dustValue', describe: (u) => '+' + (2 * u.level) + ' PER PIXEL' },
+    { id: 'homing', name: 'HOMING MISSILE', type: 'onetime',
+      cost: 150, owned: false, icon: 'missile', describe: () => 'EVERY 20 SHOTS' },
+    { id: 'homing2', name: 'HOMING MISSILE II', type: 'onetime', requires: 'homing',
+      cost: 220, owned: false, icon: 'missile', describe: () => 'ALSO EVERY 15 SHOTS' },
+    { id: 'homing3', name: 'HOMING MISSILE III', type: 'onetime', requires: 'homing2',
+      cost: 320, owned: false, icon: 'missile', describe: () => 'ALSO EVERY 7 SHOTS' },
+    { id: 'drone', name: 'DRONE', type: 'onetime',
+      cost: 180, owned: false, icon: 'drone', describe: () => '1 DRONE, 1/4 RATE' },
+    { id: 'drone2', name: 'DRONE II', type: 'onetime', requires: 'drone',
+      cost: 250, owned: false, icon: 'drone', describe: () => '2 DRONES, 1/3 RATE' },
+    { id: 'drone3', name: 'DRONE III', type: 'onetime', requires: 'drone2',
+      cost: 350, owned: false, icon: 'drone', describe: () => '3 DRONES, 1/2 RATE' }
+  ];
+
+  function findUpgrade(id) { return UPGRADES.find(u => u.id === id); }
+  function upgradeLevel(id) { const u = findUpgrade(id); return u ? (u.level || 0) : 0; }
+  function upgradeIsOwned(id) { const u = findUpgrade(id); return u ? !!u.owned : false; }
+
+  // ---------- Upgrade effect getters (used throughout gameplay) ----------
+  function fireRateMultiplier() { return Math.pow(0.9, upgradeLevel('firerate')); }
+  function thrustMultiplier() { return Math.pow(1.15, upgradeLevel('thrustpower')); }
+  function maxSpeedValue() { return 7 * Math.pow(1.1, upgradeLevel('maxspeed')); }
+  function buffDurationMultiplier() { return Math.pow(1.2, upgradeLevel('buffduration')); }
+  function magnetRadiusMultiplier() { return Math.pow(1.15, upgradeLevel('magnetrange')); }
+  function pickupValue() { return PICKUP_CURRENCY_VALUE_BASE + 2 * upgradeLevel('dustvalue'); }
+  function droneCount() {
+    if (upgradeIsOwned('drone3')) return 3;
+    if (upgradeIsOwned('drone2')) return 2;
+    if (upgradeIsOwned('drone')) return 1;
+    return 0;
+  }
+  function droneFireRatio() {
+    if (upgradeIsOwned('drone3')) return 2;
+    if (upgradeIsOwned('drone2')) return 3;
+    return 4;
+  }
+
+  function upgradeOwned(u) {
+    return u.type === 'onetime' ? u.owned : u.purchasedThisVisit;
+  }
+  function upgradeCost(u) {
+    if (u.type === 'onetime') {
+      if (u.owned) return null;
+      if (u.requires && !upgradeIsOwned(u.requires)) return null; // locked behind prerequisite
+      return u.cost;
+    }
+    if (u.purchasedThisVisit) return null;
+    if (u.level >= u.maxLevel) return null;
+    return Math.round(u.baseCost * Math.pow(u.costGrowth, u.level));
+  }
+  function purchaseUpgrade(u) {
+    const cost = upgradeCost(u);
+    if (cost === null) return;
+    if (currency < cost) {
+      stationShopMessage = 'NOT ENOUGH CURRENCY';
+      stationShopMessageTimer = 90;
+      say('Not enough currency: ' + u.name.toLowerCase() + ' costs ' + cost + ', you have ' + currency + '.');
+      return;
+    }
+    currency -= cost;
+    if (u.type === 'onetime') {
+      u.owned = true;
+    } else {
+      u.level++;
+      u.purchasedThisVisit = true;
+      if (u.id === 'extralife') lives++;
+    }
+    stationShopMessage = u.name + ' PURCHASED';
+    stationShopMessageTimer = 90;
+    say(u.name.toLowerCase() + ' purchased. ' + currency + ' left.');
+    sfx.buffUp();
+  }
+  function resetShopVisitLimits() {
+    for (const u of UPGRADES) {
+      if (u.type === 'stackable') u.purchasedThisVisit = false;
+    }
+  }
+
+
+  // ---------- Homing missile (upgrade) ----------
+  const HOMING_MISSILE_EVERY_T1 = 20;
+  const HOMING_MISSILE_EVERY_T2 = 15;
+  const HOMING_MISSILE_EVERY_T3 = 7;
+  const HOMING_MISSILE_TURN_RATE = 0.06;
+  const HOMING_MISSILE_SPEED = 6;
+  const HOMING_MISSILE_LIFE = 240;
+  let totalShotsFired = 0;
+  let missiles = [];
+
+  function normalizeAngleDiff(a) {
+    while (a > Math.PI) a -= TWO_PI;
+    while (a < -Math.PI) a += TWO_PI;
+    return a;
+  }
+
+  function pickMissileTarget() {
+    const candidates = asteroids.slice();
+    if (saucer) candidates.push(saucer);
+    if (candidates.length === 0) return null;
+    return candidates[Math.floor(rand(0, candidates.length))];
+  }
+
+  function launchHomingMissile() {
+    const target = pickMissileTarget();
+    if (!target) return;
+    missiles.push({
+      x: ship.x, y: ship.y,
+      angle: ship.angle,
+      target,
+      life: HOMING_MISSILE_LIFE,
+      trail: [],
+      r: 4
+    });
+  }
+
+  function updateMissiles() {
+    for (let i = missiles.length - 1; i >= 0; i--) {
+      const m = missiles[i];
+      m.life--;
+      const targetGone = !m.target || (asteroids.indexOf(m.target) === -1 && m.target !== saucer);
+      if (targetGone) {
+        m.target = pickMissileTarget();
+      }
+      if (m.life <= 0 || !m.target) { missiles.splice(i, 1); continue; }
+
+      const desiredAngle = Math.atan2(m.target.y - m.y, m.target.x - m.x);
+      const diff = normalizeAngleDiff(desiredAngle - m.angle);
+      m.angle += Math.max(-HOMING_MISSILE_TURN_RATE, Math.min(HOMING_MISSILE_TURN_RATE, diff));
+
+      m.trail.push({ x: m.x, y: m.y });
+      if (m.trail.length > 12) m.trail.shift();
+
+      m.x += Math.cos(m.angle) * HOMING_MISSILE_SPEED;
+      m.y += Math.sin(m.angle) * HOMING_MISSILE_SPEED;
+      wrap(m);
+
+      for (const a of asteroids) {
+        if (dist(m, a) < a.r) {
+          missiles.splice(i, 1);
+          breakAsteroid(a);
+          break;
+        }
+      }
+      if (missiles[i] !== m) continue; // consumed above
+      if (saucer && dist(m, saucer) < saucer.r) {
+        missiles.splice(i, 1);
+        score += saucer.large ? 200 : 1000;
+        updateHud();
+        checkExtraLife();
+        spawnDebris(saucer.x, saucer.y, 50);
+        maybeSpawnPickup(saucer.x, saucer.y);
+        sfx.bangMedium();
+        saucer = null;
+        checkLevelComplete();
+      }
+    }
+  }
+
+  function drawMissiles() {
+    for (const m of missiles) {
+      for (let i = 0; i < m.trail.length; i++) {
+        const t = m.trail[i];
+        const a = i / m.trail.length;
+        ctx.fillStyle = 'rgba(255,150,60,' + (a*0.5).toFixed(2) + ')';
+        ctx.fillRect(t.x-1.5, t.y-1.5, 3, 3);
+      }
+      ctx.save();
+      ctx.translate(m.x, m.y);
+      ctx.rotate(m.angle);
+      ctx.strokeStyle = 'rgb(255,150,60)';
+      ctx.shadowColor = 'rgb(255,150,60)';
+      ctx.shadowBlur = 6 * GLOW_SCALE;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(7, 0);
+      ctx.lineTo(-5, 3.5);
+      ctx.lineTo(-5, -3.5);
+      ctx.closePath();
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  // ---------- Drone (upgrade) ----------
+  const DRONE_ORBIT_RADIUS = 70;
+  const DRONE_ORBIT_SPEED = 0.020;
+  let droneBaseAngle = 0;
+  let droneCooldowns = [0, 0, 0];
+
+  function updateDrones() {
+    const count = droneCount();
+    if (count === 0 || !ship) return;
+    droneBaseAngle += DRONE_ORBIT_SPEED;
+    const ratio = droneFireRatio();
+    for (let i = 0; i < count; i++) {
+      const angle = droneBaseAngle + (TWO_PI / count) * i;
+      const x = ship.x + Math.cos(angle) * DRONE_ORBIT_RADIUS;
+      const y = ship.y + Math.sin(angle) * DRONE_ORBIT_RADIUS;
+
+      if (droneCooldowns[i] > 0) droneCooldowns[i]--;
+      if (droneCooldowns[i] <= 0) {
+        const fireRateMult = fireRateMultiplier();
+        const baseCooldown = (activeBuff && activeBuff.type === 'rapid') ? SHIP_RAPID_COOLDOWN : SHIP_BASE_COOLDOWN;
+        droneCooldowns[i] = Math.max(1, Math.round(baseCooldown * fireRateMult)) * ratio;
+        bullets.push({
+          x, y,
+          vx: Math.cos(angle) * 8, vy: Math.sin(angle) * 8,
+          life: 60, buffed: false, fromDrone: true
+        });
+      }
+    }
+  }
+
+  function drawDrones() {
+    const count = droneCount();
+    if (count === 0 || !ship) return;
+    for (let i = 0; i < count; i++) {
+      const angle = droneBaseAngle + (TWO_PI / count) * i;
+      const x = ship.x + Math.cos(angle) * DRONE_ORBIT_RADIUS;
+      const y = ship.y + Math.sin(angle) * DRONE_ORBIT_RADIUS;
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.strokeStyle = COLORS.signal;
+      ctx.shadowColor = COLORS.signal;
+      ctx.shadowBlur = 6 * GLOW_SCALE;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(0, 0, 6, 0, TWO_PI);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+
+  function drawPickups() {
+    for (const p of pickups) {
+      // expiring pickups blink at most 3 times a second; steady under reduced motion
+      const blink = p.life < 90 && !CP.motionReduced() ? (Math.floor(p.life / 10) % 2 === 0) : true;
+      if (!blink) continue;
+      ctx.save();
+      ctx.fillStyle = 'rgb(' + PICKUP_COLOR + ')';
+      ctx.shadowColor = 'rgb(' + PICKUP_COLOR + ')';
+      ctx.shadowBlur = 8 * GLOW_SCALE;
+      ctx.fillRect(Math.round(p.x - PICKUP_SIZE/2), Math.round(p.y - PICKUP_SIZE/2), PICKUP_SIZE, PICKUP_SIZE);
+      ctx.restore();
+    }
+  }
+
+  function resolveDustInteractions() {
+    if (particles.length === 0) return;
+
+    const shipSpeed = ship ? Math.sqrt(ship.vx*ship.vx + ship.vy*ship.vy) : 0;
+    const magnetActive = state === 'playing' && ship && shipSpeed < MAGNET_SPEED_THRESHOLD;
+
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+
+      if (state === 'playing' && ship) {
+        const dx = ship.x - p.x;
+        const dy = ship.y - p.y;
+        const distSq = dx*dx + dy*dy;
+        const distance = Math.sqrt(distSq) || 0.01;
+        const effectiveMagnetRadius = MAGNET_RADIUS * magnetRadiusMultiplier();
+
+        if (magnetActive && distance < effectiveMagnetRadius) {
+          // slow ship: dust gets pulled in, stronger the closer it is
+          const pull = 0.4 * (1 - distance / effectiveMagnetRadius);
+          p.vx += (dx / distance) * pull;
+          p.vy += (dy / distance) * pull;
+
+          if (distance < ship.r * 0.9) {
+            particles.splice(i, 1);
+            collectDust();
+            continue;
+          }
+        } else {
+          // fast ship (or out of magnet range): just physically shove it aside
+          const minDist = ship.r + p.r;
+          if (distSq < minDist*minDist) {
+            const nx = -dx / distance, ny = -dy / distance;
+            const overlap = minDist - distance;
+            p.x += nx * overlap;
+            p.y += ny * overlap;
+            p.vx += nx * 1.2 + ship.vx * 0.5;
+            p.vy += ny * 1.2 + ship.vy * 0.5;
+          }
+        }
+      }
+
+      // asteroids always just physically push dust out of the way
+      for (const a of asteroids) {
+        const adx = p.x - a.x, ady = p.y - a.y;
+        const minDist = a.r + p.r;
+        const distSq2 = adx*adx + ady*ady;
+        if (distSq2 < minDist*minDist) {
+          const distance2 = Math.sqrt(distSq2) || 0.01;
+          const nx = adx / distance2, ny = ady / distance2;
+          const overlap = minDist - distance2;
+          p.x += nx * overlap;
+          p.y += ny * overlap;
+          p.vx += nx * 1.2 + a.vx * 0.5;
+          p.vy += ny * 1.2 + a.vy * 0.5;
+        }
+      }
+    }
+  }
+
+  function updateTrail() {
+    for (let i = trail.length - 1; i >= 0; i--) {
+      const p = trail[i];
+      p.x += p.vx; p.y += p.vy;
+      p.vx *= 0.985; p.vy *= 0.985;
+      p.life--;
+      if (p.life <= 0) trail.splice(i, 1);
+    }
+  }
+
+  function checkCollisions() {
+    // bullets vs asteroids
+    for (let i = bullets.length - 1; i >= 0; i--) {
+      const b = bullets[i];
+      for (let j = asteroids.length - 1; j >= 0; j--) {
+        const a = asteroids[j];
+        if (dist(b, a) < a.r) {
+          bullets.splice(i, 1);
+          breakAsteroid(a);
+          break;
+        }
+      }
+    }
+    // bullets vs saucer
+    if (saucer) {
+      for (let i = bullets.length - 1; i >= 0; i--) {
+        const b = bullets[i];
+        if (dist(b, saucer) < saucer.r) {
+          bullets.splice(i, 1);
+          score += saucer.large ? 200 : 1000;
+          updateHud();
+          checkExtraLife();
+          spawnDebris(saucer.x, saucer.y, 50);
+          maybeSpawnPickup(saucer.x, saucer.y);
+          sfx.bangMedium();
+          saucer = null;
+          checkLevelComplete();
+          break;
+        }
+      }
+    }
+    // ship vs asteroids
+    const spawnInvincible = ship.invincible > 0;
+    const shieldBuffActive = !!(activeBuff && activeBuff.type === 'shield');
+    const immune = spawnInvincible || shieldBuffActive;
+
+    if (shieldBuffActive) {
+      const shieldRadius = ship.r * SHIELD_RADIUS_MULT;
+      for (let j = asteroids.length - 1; j >= 0; j--) {
+        const a = asteroids[j];
+        if (dist(ship, a) < a.r + shieldRadius) {
+          breakAsteroid(a);
+        }
+      }
+      if (saucer && dist(ship, saucer) < saucer.r + shieldRadius) {
+        score += saucer.large ? 200 : 1000;
+        updateHud();
+        checkExtraLife();
+        spawnDebris(saucer.x, saucer.y, 50);
+        maybeSpawnPickup(saucer.x, saucer.y);
+        sfx.bangMedium();
+        saucer = null;
+        checkLevelComplete();
+      }
+    }
+
+    if (!immune) {
+      for (const a of asteroids) {
+        if (dist(ship, a) < a.r + ship.r * 0.6) {
+          killShip();
+          return;
+        }
+      }
+      if (saucer && dist(ship, saucer) < saucer.r + ship.r * 0.6) {
+        killShip();
+        return;
+      }
+      for (let i = saucerBullets.length - 1; i >= 0; i--) {
+        const b = saucerBullets[i];
+        if (dist(ship, b) < ship.r) {
+          saucerBullets.splice(i, 1);
+          killShip();
+          break;
+        }
+      }
+    }
+  }
+
+  // ---------- Draw ----------
+  function drawShip() {
+    // Spawn invulnerability blinks (3 a second at most); under reduced motion the ship dims instead.
+    const reduced = CP.motionReduced();
+    if (!ship.blinkOn && !reduced) return;
+    let shipAlpha = state === 'docked' ? (1 - stationDockFadeT) : (state === 'shop' ? 0 : 1);
+    if (reduced && ship.invincible > 0) shipAlpha *= 0.55;
+    if (shipAlpha <= 0.01) return;
+    ctx.save();
+    ctx.globalAlpha = shipAlpha;
+    ctx.translate(ship.x, ship.y);
+
+    if (activeBuff && activeBuff.type === 'shield') {
+      const pulse = reduced ? 1 : 0.7 + 0.3 * Math.sin(shell.time * 1000 / 120);
+      ctx.save();
+      ctx.strokeStyle = 'rgba(150,235,255,' + pulse + ')';
+      ctx.lineWidth = 2;
+      ctx.shadowColor = 'rgba(150,235,255,1)';
+      ctx.shadowBlur = 10 * GLOW_SCALE;
+      ctx.beginPath();
+      ctx.arc(0, 0, ship.r * SHIELD_RADIUS_MULT, 0, TWO_PI);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    ctx.rotate(ship.angle);
+    ctx.scale(ship.scale, ship.scale);
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 2 / ship.scale;
+    ctx.shadowColor = '#fff';
+    ctx.shadowBlur = 8 * GLOW_SCALE;
+    ctx.beginPath();
+    ctx.moveTo(ship.r, 0);
+    ctx.lineTo(-ship.r*0.7, ship.r*0.6);
+    ctx.lineTo(-ship.r*0.4, 0);
+    ctx.lineTo(-ship.r*0.7, -ship.r*0.6);
+    ctx.closePath();
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawAsteroid(a) {
+    ctx.save();
+    ctx.translate(a.x, a.y);
+    ctx.rotate(a.angle);
+    ctx.globalAlpha = Math.min(1, a.spawnTimer / ASTEROID_FADE_IN_FRAMES);
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 2;
+    ctx.shadowColor = '#fff';
+    ctx.shadowBlur = 6 * GLOW_SCALE;
+    ctx.beginPath();
+    const n = a.verts.length;
+    for (let i = 0; i < n; i++) {
+      const ang = (i / n) * TWO_PI;
+      const rr = a.r * a.verts[i];
+      const px = Math.cos(ang) * rr;
+      const py = Math.sin(ang) * rr;
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  const BULLET_FADE_FRAMES = 12;
+
+  function drawBullets(arr, colorTriplet) {
+    colorTriplet = colorTriplet || '255,255,255';
+    ctx.save();
+    ctx.shadowBlur = 6 * GLOW_SCALE;
+    for (const b of arr) {
+      const triplet = (b.buffed || b.fromDrone) ? '150,235,255' : colorTriplet;
+      const alpha = b.fadeOut !== undefined ? Math.max(0, b.fadeOut / BULLET_FADE_FRAMES) : 1;
+      const style = 'rgba(' + triplet + ',' + alpha.toFixed(3) + ')';
+      ctx.fillStyle = style;
+      ctx.shadowColor = style;
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, 2, 0, TWO_PI);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawTrail() {
+    if (trail.length === 0) return;
+    for (const p of trail) {
+      const t = p.life / p.maxLife; // 1 = fresh, 0 = dying
+      const size = Math.max(1, Math.round(p.size * (0.5 + t * 0.5)));
+      ctx.fillStyle = 'rgba(255,255,255,' + t + ')';
+      // snap to whole pixels for a crisp, hard-edged retro look
+      ctx.fillRect(Math.round(p.x - size/2), Math.round(p.y - size/2), size, size);
+    }
+  }
+
+  function drawParticles() {
+    ctx.save();
+    ctx.shadowColor = 'rgba(165,120,255,0.8)';
+    ctx.shadowBlur = 4 * GLOW_SCALE;
+    for (const p of particles) {
+      const t = p.life / p.maxLife;
+      const size = Math.max(1, Math.round(p.size * (0.5 + t * 0.5)));
+      // dust token; fades no lower than 75% so it keeps 3:1 on every sky
+      ctx.fillStyle = 'rgba(165,120,255,' + (0.75 + t * 0.25).toFixed(3) + ')';
+      ctx.fillRect(Math.round(p.x - size/2), Math.round(p.y - size/2), size, size);
+    }
+    ctx.restore();
+  }
+
+  // New saucer design (from the uploaded SVG), drawn via Path2D so the
+  // exact original path data is reused rather than hand-redrawn. Coordinates
+  // are the SVG's raw local units, pre-transform - centered and scaled at
+  // draw time to match the previous saucer's on-screen footprint.
+  const SAUCER_PATHS = [
+    "m 76.199996,110.06667 h 8.466667 l 4.233334,-1.95834 -4.233333,-2.27499 h -8.466666 l -4.233333,2.27499 z",
+    "m 76.199996,105.83333 2.116667,-1.73601 h 4.233333 l 2.116667,1.73601 z",
+    "m 77.196126,110.09995 0.539615,1.80789 h 5.395177 l 0.539615,-1.80789 z"
+  ].map(d => new Path2D(d));
+  const SAUCER_SRC_CENTER_X = 80.43;
+  const SAUCER_SRC_CENTER_Y = 108.0;
+  const SAUCER_SRC_WIDTH = 16.93; // bounding box width in the SVG's own units
+
+  function drawSaucer() {
+    if (!saucer) return;
+    const scale = (saucer.r * 2) / SAUCER_SRC_WIDTH; // match previous saucer.r-based size
+    ctx.save();
+    ctx.translate(saucer.x, saucer.y);
+    ctx.scale(scale, scale);
+    ctx.translate(-SAUCER_SRC_CENTER_X, -SAUCER_SRC_CENTER_Y);
+    ctx.strokeStyle = COLORS.hostile;
+    ctx.lineWidth = 2 / scale;
+    ctx.shadowColor = COLORS.hostile;
+    ctx.shadowBlur = 6 * GLOW_SCALE / scale;
+    for (const p of SAUCER_PATHS) ctx.stroke(p);
+    ctx.restore();
+  }
+
+  // Space station design v2 (simplified cross/plus shape with 4 landing
+  // pads, one per arm). Two overlapping rects form the cross body; four
+  // small quadrilaterals at the concave inner corners are the engines; four
+  // arrow shapes point at the pads purely as a visual cue (not used for
+  // gameplay geometry, which is derived analytically below instead).
+  const SPACE_STATION_SRC_CENTER_X = 115.7317, SPACE_STATION_SRC_CENTER_Y = 127.3619, SPACE_STATION_SRC_WIDTH = 41.6259;
+
+  // Body: vertical bar + horizontal bar (already resolved to plain rects -
+  // the horizontal one was a rotated copy of the same rect in the source).
+  const STATION_BODY_RECTS = [
+    { x: 105.3252, y: 106.54888, w: 20.81296, h: 41.625919 },   // vertical bar
+    { x: 94.918701, y: 116.95538, w: 41.62592, h: 20.81296 }    // horizontal bar (post-rotation)
+  ];
+  // Small arrow markers pointing at each pad (decorative only).
+  const SPACE_STATION_ARROW_PATHS = [
+    "m 97.452968,122.15861 5.203252,5.20323 -5.203252,5.20324 z",   // left
+    "m 120.93491,109.08317 -5.20322,5.20323 -5.20325,-5.20323 z",   // top
+    "m 134.01035,132.56508 -5.20323,-5.20322 5.20323,-5.20325 z",   // right
+    "m 110.52844,145.64052 5.20322,-5.20322 5.20325,5.20322 z"      // bottom
+  ].map(d => new Path2D(d));
+  // Small corner details at the concave inner corners (between arms).
+  const SPACE_STATION_ENGINE_PATHS = [
+    "m 100.88394,138.53033 -2.358222,3.51413 2.523342,2.52334 3.51413,-2.35822 z", // Engine1 (bottom-left)
+    "m 100.88394,116.19339 -2.358222,-3.51413 2.523342,-2.52334 3.51413,2.35822 z", // path60 (top-left)
+    "m 130.57938,138.53033 2.35825,3.51413 -2.52334,2.52334 -3.51416,-2.35822 z",   // Engine4 (bottom-right)
+    "m 130.57938,116.19339 2.35825,-3.51413 -2.52334,-2.52334 -3.51416,2.35822 z"   // path62 (top-right)
+  ].map(d => new Path2D(d));
+
+  // True relative scale, computed directly from the SVG's own units.
+  const STATION_TRUE_RATIO = SPACE_STATION_SRC_WIDTH / SAUCER_SRC_WIDTH;
+  const STATION_SCALE_MULTIPLIER = 1.0;
+
+  function drawSpaceStation(x, y, targetWidth, angle, color, alpha) {
+    color = color || COLORS.station;
+    alpha = alpha === undefined ? 1 : alpha;
+    const scale = targetWidth / SPACE_STATION_SRC_WIDTH;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.translate(x, y);
+    ctx.rotate(angle || 0);
+    ctx.scale(scale, scale);
+    ctx.translate(-SPACE_STATION_SRC_CENTER_X, -SPACE_STATION_SRC_CENTER_Y);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2 / scale;
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 6 * GLOW_SCALE / scale;
+
+    for (const r of STATION_BODY_RECTS) ctx.strokeRect(r.x, r.y, r.w, r.h);
+    for (const p of SPACE_STATION_ARROW_PATHS) ctx.stroke(p);
+    for (const p of SPACE_STATION_ENGINE_PATHS) ctx.stroke(p);
+
+    ctx.restore();
+  }
+
+  // ---------- Station physics/logic ----------
+  function stationLocalToWorld(st, lx, ly) {
+    const c = Math.cos(st.angle), s = Math.sin(st.angle);
+    return { x: st.x + lx*c - ly*s, y: st.y + lx*s + ly*c };
+  }
+  function worldToStationLocal(st, wx, wy) {
+    const dx = wx - st.x, dy = wy - st.y;
+    const c = Math.cos(-st.angle), s = Math.sin(-st.angle);
+    return { x: dx*c - dy*s, y: dx*s + dy*c };
+  }
+
+  const SAUCER_DIAMETER_INGAME = 64; // matches the saucer's current in-game size (r=32)
+
+  function beginStationApproach() {
+    resetShopVisitLimits();
+    stationShopPage = 0;
+    stationShopLine = SHOP_ONE_LINERS[Math.floor(rand(0, SHOP_ONE_LINERS.length))];
+    const stationWidth = SAUCER_DIAMETER_INGAME * STATION_TRUE_RATIO * STATION_SCALE_MULTIPLIER;
+
+    const margin = stationWidth * 0.6;
+    const edge = Math.floor(rand(0, 4));
+    let startX, startY;
+    if (edge === 0)      { startX = rand(0, W); startY = -margin; }
+    else if (edge === 1) { startX = W + margin; startY = rand(0, H); }
+    else if (edge === 2) { startX = rand(0, W); startY = H + margin; }
+    else                 { startX = -margin; startY = rand(0, H); }
+
+    const parkAngle = rand(0, TWO_PI);
+    const parkDist = stationWidth * rand(0.35, 0.55);
+    const parkX = W/2 + Math.cos(parkAngle) * parkDist;
+    const parkY = H/2 + Math.sin(parkAngle) * parkDist;
+
+    station = {
+      x: startX, y: startY,
+      width: stationWidth,
+      alpha: 0,
+      angle: rand(0, TWO_PI),
+      parked: false,
+      arrival: { startX, startY, parkX, parkY, timer: 0, totalFrames: 1260 }
+    };
+    stationEngineSmoke = [];
+    stationDockFadeT = 0;
+    stationShopFadeT = 0;
+    stationSelectedCard = 0;
+    ship.vx = 0; ship.vy = 0;
+  }
+
+  function updateStationArrival() {
+    if (!station.parked) {
+      const a = station.arrival;
+      a.timer++;
+      const t = Math.min(1, a.timer / a.totalFrames);
+      const eased = 1 - Math.pow(1 - t, 3);
+      station.x = lerp(a.startX, a.parkX, eased);
+      station.y = lerp(a.startY, a.parkY, eased);
+      if (t >= 1) station.parked = true;
+    }
+    if (station.alpha < 1) station.alpha += 0.05;
+    station.angle += STATION_SPIN_RATE * STATION_SPIN_MULTIPLIER;
+  }
+
+  function updateStationEnginePush() {
+    if (!station || !ship) return;
+    const pushRadius = station.width * ENGINE_PUSH_RADIUS_RATIO;
+    for (const e of ENGINE_LOCAL_OFFSETS) {
+      const lx = e.x * station.width, ly = e.y * station.width;
+      const worldPos = stationLocalToWorld(station, lx, ly);
+      const dx = ship.x - worldPos.x, dy = ship.y - worldPos.y;
+      const d = Math.hypot(dx, dy) || 0.001;
+      if (d < pushRadius) {
+        const strength = ENGINE_PUSH_FORCE * (1 - d / pushRadius);
+        ship.vx += (dx / d) * strength;
+        ship.vy += (dy / d) * strength;
+      }
+    }
+  }
+
+  function updateStationEngineSmoke() {
+    if (!station) return;
+    for (const e of ENGINE_LOCAL_OFFSETS) {
+      const lx = e.x * station.width, ly = e.y * station.width;
+      const worldPos = stationLocalToWorld(station, lx, ly);
+      const dirLen = Math.hypot(lx, ly) || 1;
+      const c = Math.cos(station.angle), s = Math.sin(station.angle);
+      const outX = (lx/dirLen)*c - (ly/dirLen)*s;
+      const outY = (lx/dirLen)*s + (ly/dirLen)*c;
+      if (Math.random() < 0.7) {
+        stationEngineSmoke.push({
+          x: worldPos.x, y: worldPos.y,
+          vx: outX * rand(1.4, 2.4), vy: outY * rand(1.4, 2.4),
+          life: rand(70, 120), maxLife: 120,
+          size: rand(2, 4)
+        });
+      }
+    }
+    for (let i = stationEngineSmoke.length - 1; i >= 0; i--) {
+      const p = stationEngineSmoke[i];
+      p.x += p.vx; p.y += p.vy;
+      p.vx *= 0.995; p.vy *= 0.995;
+      p.life--;
+      if (p.life <= 0) stationEngineSmoke.splice(i, 1);
+    }
+  }
+
+  function drawStationEngineSmoke() {
+    for (const p of stationEngineSmoke) {
+      const t = p.life / p.maxLife;
+      const size = Math.max(1, Math.round(p.size * (0.5 + t*0.5)));
+      ctx.fillStyle = 'rgba(210,210,220,' + (t*0.5).toFixed(3) + ')';
+      ctx.fillRect(Math.round(p.x - size/2), Math.round(p.y - size/2), size, size);
+    }
+  }
+
+  function isInAnyPadChannel(local) {
+    const halfWidthPx = station.width * PAD_HALF_WIDTH_RATIO;
+    const outerDistPx = station.width * PAD_OUTER_DIST_RATIO;
+    const depthPx = PAD_DEPTH_PX;
+    for (const d of STATION_PAD_DIRECTIONS) {
+      const along = local.x*d.ox + local.y*d.oy;
+      const across = local.x*d.px + local.y*d.py;
+      if (Math.abs(across) < halfWidthPx && along > (outerDistPx - depthPx)) return true;
+    }
+    return false;
+  }
+
+  function rectPushOut(local, halfW, halfH, r) {
+    // Minimum-translation push to get a circle of radius r fully outside a
+    // rect centered on the origin - handles both "just touching the edge"
+    // and "center already inside" cases via the same min-penetration logic.
+    const ex = halfW + r, ey = halfH + r;
+    if (Math.abs(local.x) > ex || Math.abs(local.y) > ey) return null;
+    const penRight = ex - local.x, penLeft = local.x + ex;
+    const penBottom = ey - local.y, penTop = local.y + ey;
+    const minPen = Math.min(penRight, penLeft, penBottom, penTop);
+    if (minPen === penRight) return { x: penRight, y: 0 };
+    if (minPen === penLeft) return { x: -penLeft, y: 0 };
+    if (minPen === penBottom) return { x: 0, y: penBottom };
+    return { x: 0, y: -penTop };
+  }
+
+  function checkStationHullCollision() {
+    if (!station || !ship) return;
+    const local = worldToStationLocal(station, ship.x, ship.y);
+    if (isInAnyPadChannel(local)) return; // free to fly through any of the 4 pad openings
+
+    const halfThick = station.width * STATION_HULL_HALF_THICKNESS_RATIO;
+    const outerDist = station.width * PAD_OUTER_DIST_RATIO;
+
+    const pushVert = rectPushOut(local, halfThick, outerDist, ship.r);  // vertical bar
+    const pushHoriz = rectPushOut(local, outerDist, halfThick, ship.r); // horizontal bar
+
+    let push = null;
+    if (pushVert && pushHoriz) {
+      const m1 = Math.hypot(pushVert.x, pushVert.y), m2 = Math.hypot(pushHoriz.x, pushHoriz.y);
+      push = m1 < m2 ? pushVert : pushHoriz;
+    } else {
+      push = pushVert || pushHoriz;
+    }
+    if (!push) return;
+
+    const c = Math.cos(station.angle), s = Math.sin(station.angle);
+    const worldPushX = push.x*c - push.y*s, worldPushY = push.x*s + push.y*c;
+    ship.x += worldPushX;
+    ship.y += worldPushY;
+    const pushLen = Math.hypot(worldPushX, worldPushY) || 1;
+    const nx = worldPushX/pushLen, ny = worldPushY/pushLen;
+    const vDotN = ship.vx*nx + ship.vy*ny;
+    if (vDotN < 0) { ship.vx -= vDotN*nx; ship.vy -= vDotN*ny; }
+  }
+
+  function checkStationDocking() {
+    if (!station) return;
+    const local = worldToStationLocal(station, ship.x, ship.y);
+    const halfWidthPx = station.width * PAD_HALF_WIDTH_RATIO;
+    const outerDistPx = station.width * PAD_OUTER_DIST_RATIO;
+    const depthPx = PAD_DEPTH_PX;
+    for (const d of STATION_PAD_DIRECTIONS) {
+      const along = local.x*d.ox + local.y*d.oy;
+      const across = local.x*d.px + local.y*d.py;
+      const withinAcross = Math.abs(across) < halfWidthPx;
+      const withinAlong = along < outerDistPx + 15 && along > (outerDistPx - depthPx);
+      if (withinAcross && withinAlong && along < (outerDistPx - depthPx * 0.5)) {
+        state = 'docked';
+        stationDockFadeT = 0;
+        dockingResultText = 'DOCKED';
+        say('Docked.');
+        return;
+      }
+    }
+  }
+
+  function drawStationOpeningMarker() {
+    if (!station) return;
+    const halfWidthPx = station.width * PAD_HALF_WIDTH_RATIO;
+    const outerDistPx = station.width * PAD_OUTER_DIST_RATIO;
+    // marker-blink 260ms on game time; steady under reduced motion
+    const blinkOn = CP.motionReduced() || Math.floor(shell.time * 1000 / 260) % 2 === 0;
+    const alpha = blinkOn ? 1 : 0.08;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(150,235,255,' + alpha.toFixed(2) + ')';
+    ctx.shadowColor = 'rgba(150,235,255,1)';
+    ctx.shadowBlur = (blinkOn ? 18 : 4) * GLOW_SCALE;
+    ctx.lineWidth = 4;
+    for (const d of STATION_PAD_DIRECTIONS) {
+      const cx = d.ox * outerDistPx, cy = d.oy * outerDistPx;
+      const p1 = stationLocalToWorld(station, cx - d.px*halfWidthPx, cy - d.py*halfWidthPx);
+      const p2 = stationLocalToWorld(station, cx + d.px*halfWidthPx, cy + d.py*halfWidthPx);
+      ctx.beginPath();
+      ctx.moveTo(p1.x, p1.y);
+      ctx.lineTo(p2.x, p2.y);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function stationColor() {
+    if (state === 'shop') return '#fff';
+    if (state !== 'docked' || stationDockFadeT <= 0) return COLORS.station;
+    const r = Math.round(lerp(90, 255, stationDockFadeT));
+    const g = Math.round(lerp(135, 255, stationDockFadeT));
+    const b = Math.round(lerp(135, 255, stationDockFadeT));
+    return 'rgb(' + r + ',' + g + ',' + b + ')';
+  }
+
+
+  // Vector text: the kit's Asteroids font, scaled and glowing with UI_SCALE.
+  function vtext(str, x, y, size, opts) {
+    opts = Object.assign({ uiScale: UI_SCALE }, opts || {});
+    CP.drawVectorText(ctx, str, x, y, size, opts);
+  }
+
+  function drawStars() {
+    for (const s of stars) {
+      const twinkle = 0.5 + 0.5 * Math.sin(s.phase);
+      const alpha = s.baseAlpha * (0.4 + 0.6 * twinkle);
+      ctx.fillStyle = 'rgba(255,255,255,' + alpha.toFixed(3) + ')';
+      ctx.fillRect(s.x, s.y, s.size, s.size);
+    }
+  }
+
+  // Each streak lives at a fixed radial position (it doesn't travel) - it
+  // snaps to full length almost instantly, holds briefly, then contracts
+  // back to a point while fading, matching the classic lightspeed-jump look.
+  // Fully independent of the background starfield, which never moves here.
+  function spawnWarpStreaks(intensity) {
+    warpSpawnAccumulator += intensity * WARP_SPAWN_RATE;
+    while (warpSpawnAccumulator >= 1) {
+      warpSpawnAccumulator -= 1;
+      const angle = rand(0, TWO_PI);
+      const outerDist = rand(WARP_OUTER_MIN, WARP_OUTER_MAX);
+      const maxLength = Math.min(rand(100, 320), outerDist - WARP_CENTER_MASK_RADIUS);
+      warpStreaks.push({
+        angle,
+        outerDist,
+        maxLength: Math.max(10, maxLength),
+        width: rand(1, 2.5),
+        baseAlpha: intensity * rand(0.6, 1.0),
+        age: 0
+      });
+    }
+  }
+
+  function updateWarpStreaks(intensity) {
+    spawnWarpStreaks(intensity);
+    for (let i = warpStreaks.length - 1; i >= 0; i--) {
+      const s = warpStreaks[i];
+      s.age++;
+      if (s.age > WARP_STREAK_LIFE) {
+        warpStreaks.splice(i, 1);
+      }
+    }
+  }
+
+  function drawWarpStreaks(intensity) {
+    if (warpStreaks.length === 0) return;
+    ctx.save();
+    for (const s of warpStreaks) {
+      let lengthFrac;
+      if (s.age < WARP_GROW_FRAMES) {
+        const gt = s.age / WARP_GROW_FRAMES;
+        lengthFrac = 1 - (1 - gt) * (1 - gt); // ease-out: snaps to full length fast
+      } else if (s.age < WARP_GROW_FRAMES + WARP_HOLD_FRAMES) {
+        lengthFrac = 1;
+      } else {
+        const st = (s.age - WARP_GROW_FRAMES - WARP_HOLD_FRAMES) / WARP_SHRINK_FRAMES;
+        lengthFrac = Math.max(0, 1 - st * st); // ease-in: contracts back to a point
+      }
+
+      const headX = WARP_ORIGIN_X + Math.cos(s.angle) * s.outerDist;
+      const headY = WARP_ORIGIN_Y + Math.sin(s.angle) * s.outerDist;
+      const tailDist = s.outerDist - s.maxLength * lengthFrac;
+      const tailX = WARP_ORIGIN_X + Math.cos(s.angle) * tailDist;
+      const tailY = WARP_ORIGIN_Y + Math.sin(s.angle) * tailDist;
+      const alpha = s.baseAlpha * lengthFrac;
+      if (alpha <= 0.01) continue;
+
+      const grad = ctx.createLinearGradient(headX, headY, tailX, tailY);
+      grad.addColorStop(0, 'rgba(255,255,255,' + alpha.toFixed(3) + ')');
+      grad.addColorStop(1, 'rgba(255,255,255,0)');
+
+      ctx.strokeStyle = grad;
+      ctx.lineWidth = s.width;
+      ctx.beginPath();
+      ctx.moveTo(headX, headY);
+      ctx.lineTo(tailX, tailY);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  const STAR_COUNT = 330;
+  let stars = [];
+  function buildStars() {
+    stars.length = 0;
+    for (let i = 0; i < STAR_COUNT; i++) {
+      const depth = rand(0.25, 1); // 0.25 = distant/dim/slow, 1 = near/bright/fast
+      stars.push({
+        x: rand(0, W),
+        y: rand(0, H),
+        depth: depth,
+        size: depth > 0.75 ? 2 : 1,
+        baseAlpha: rand(0.25, 0.5) + depth * 0.4,
+        phase: rand(0, TWO_PI),
+        twinkleSpeed: rand(0.015, 0.05)
+      });
+    }
+  }
+
+  function updateStars() {
+    for (const s of stars) {
+      s.phase += s.twinkleSpeed;
+
+      // parallax: stars drift opposite the ship's motion, nearer stars drift faster
+      if (state === 'playing' && ship) {
+        s.x -= ship.vx * s.depth * 0.5;
+        s.y -= ship.vy * s.depth * 0.5;
+        if (s.x < 0) s.x += W;
+        if (s.x > W) s.x -= W;
+        if (s.y < 0) s.y += H;
+        if (s.y > H) s.y -= H;
+      }
+    }
+  }
+
+  // Faint oscilloscope-style graticule (kit ScopeGrid: 80px, 3%, drifts up
+  // to 24px opposite the ship, holds still under reduced motion).
+  const scopeGrid = CP.createScopeGrid();
+
+  function clampEntitiesToBounds() {
+    function rewrap(o) {
+      if (!o) return;
+      o.x = ((o.x % W) + W) % W;
+      o.y = ((o.y % H) + H) % H;
+    }
+    if (ship) rewrap(ship);
+    if (saucer) rewrap(saucer);
+    if (asteroids) for (const a of asteroids) rewrap(a);
+    if (bullets) for (const b of bullets) rewrap(b);
+    if (saucerBullets) for (const b of saucerBullets) rewrap(b);
+    if (particles) for (const p of particles) rewrap(p);
+    if (trail) for (const p of trail) rewrap(p);
+  }
+
+  // Touch fire circle (FireButton geometry). Drawn here rather than with the
+  // kit's drawFireButton, whose idle stroke (18% white) is under 3:1; this one
+  // idles at 50% white (4.8:1 on every sky step).
+  function fireGeometry() { return CP.fireButtonGeometry(H, UI_SCALE); }
+  function drawFireHint() {
+    if (!USE_FIRE_BUTTON) return;
+    if (!isTouchDevice) return;
+    if (state !== 'playing' && state !== 'approaching') return;
+    const g = fireGeometry();
+    const active = dragFireActive || (shell && shell.isDown('fire'));
+    ctx.save();
+    ctx.strokeStyle = active ? 'rgba(255,255,255,0.85)' : 'rgba(255,255,255,0.5)';
+    ctx.shadowColor = 'rgba(255,255,255,0.9)';
+    ctx.shadowBlur = (active ? 10 : 0) * UI_SCALE * GLOW_SCALE;
+    ctx.lineWidth = 2 * UI_SCALE;
+    ctx.beginPath();
+    ctx.arc(g.cx, g.cy, g.radius, 0, TWO_PI);
+    ctx.stroke();
+    // Never colour alone: the circle is labelled, and fills a little while firing.
+    if (active) { ctx.fillStyle = 'rgba(255,255,255,0.08)'; ctx.fill(); }
+    ctx.restore();
+    vtext('FIRE', g.cx, g.cy + 6 * 0.9 * UI_SCALE, 0.9 * UI_SCALE,
+      { align: 'center', color: active ? COLORS.ink : 'rgba(255,255,255,0.6)', glow: 0 });
+  }
+
+  // Spend HUD (kit drawHud): SCORE: and lives top-left, WAVE centred,
+  // currency right, ending where the shell's settings / pause / sound begin.
+  function drawGameHud() {
+    const showWave = state === 'playing' || state === 'levelstart';
+    const right = shell.hudRight(W, UI_SCALE);
+    const hud = { score, lives, currency, uiScale: UI_SCALE, right };
+    // On narrow screens WAVE would run into the currency: it drops to the lives row, still centred.
+    const waveText = 'WAVE ' + pad2(level), ws = 1.1 * UI_SCALE;
+    const currencyLeft = right - 25 * UI_SCALE - CP.inkWidth(String(currency).padStart(3, '0'), ws);
+    const waveFits = W / 2 + CP.inkWidth(waveText, ws) / 2 + 16 * UI_SCALE < currencyLeft;
+    if (showWave && waveFits) hud.wave = level;
+    if (state === 'playing') {
+      hud.meter = 'DUST:' + Math.floor((dustCollected / DUST_THRESHOLD) * 100) + '%';
+      if (activeBuff) hud.buff = BUFF_NAMES[activeBuff.type] + ' ' + Math.ceil(activeBuff.timer / 60) + 'S';
+      if (nextBuffType) hud.next = 'NEXT:' + BUFF_NAMES[nextBuffType];
+    }
+    CP.drawHud(ctx, W, hud);
+    if (showWave && !waveFits) vtext(waveText, W / 2, 66 * UI_SCALE, ws, { align: 'center', glow: 6 });
+    drawFireHint();
+  }
+  // ---------- Upgrade shop UI (kit ShopCard, page arrows and LEAVE button) ----------
+  const SHOP_PAGE_SIZE = 4;
+  let stationShopPage = 0;
+  const SHOP_ONE_LINERS = [
+    "You have travelled far.",
+    "It's been a long time since I saw a ship like yours.",
+    "Nice to see a new face. I had almost forgotten what that meant.",
+    "You're a long way from anywhere.",
+    "Still searching, are you?",
+    "I won't ask what brought you here.",
+    "Most pilots don't come this far twice.",
+    "You look like someone who has forgotten the way home.",
+    "The station is quiet tonight. It usually is.",
+    "I've seen many ships pass through. Few of them return.",
+    "You can rest here, if you still remember how.",
+    "There are places even I don't go anymore.",
+    "The lights are on. That's something.",
+    "I stopped counting the years a long time ago.",
+    "We don't get many visitors out here.",
+    "You're carrying more than cargo, I think.",
+    "The last pilot asked the same questions.",
+    "He never came back for his answer.",
+    "You're not the first to follow that signal.",
+    "Whatever you're looking for, it may not be waiting.",
+    "I could tell you what lies ahead. I could also be wrong.",
+    "The old routes are gone now.",
+    "Some say there's still a place beyond the dark.",
+    "I've heard your kind of story before.",
+    "You should leave before the lights go out.",
+    "The station remembers everyone who stops here.",
+    "You have the look of someone who has seen too much space.",
+    "If you find what you're looking for, don't wake it.",
+    "There's no shame in turning back. Few do.",
+    "Safe travels, pilot. If there is such a thing.",
+    "Don't follow the lights beyond the station.",
+    "You're earlier than I expected.",
+    "I wondered when you would arrive.",
+    "No, we've never met. Not here.",
+    "The dark has been asking about you.",
+    "I keep this station open for reasons I've forgotten.",
+    "You came from that direction? Then you've already seen it.",
+    "Some things are better left without a name.",
+    "If you hear singing, keep flying.",
+    "You should not be able to see that from here."
+  ];
+  let stationShopLine = '';
+  function currentPageUpgrades() {
+    const start = stationShopPage * SHOP_PAGE_SIZE;
+    return UPGRADES.slice(start, start + SHOP_PAGE_SIZE);
+  }
+  function totalShopPages() {
+    return Math.ceil(UPGRADES.length / SHOP_PAGE_SIZE);
+  }
+
+  // CSS px per canvas px, so hit boxes can grow to 44 CSS px on small screens.
+  function cssScale() {
+    const r = canvas.getBoundingClientRect();
+    return r.width && W ? r.width / W : 1;
+  }
+  function touchRect(r) {
+    const min = 44 / cssScale();
+    const w = Math.max(r.w, min), h = Math.max(r.h, min);
+    return { x: r.x - (w - r.w) / 2, y: r.y - (h - r.h) / 2, w, h };
+  }
+  function inRect(x, y, r) { return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h; }
+
+  function shopGeom() { return CP.shopLayout(W, H, UI_SCALE); }
+  function shopCardRects() {
+    const L = shopGeom();
+    return currentPageUpgrades().map((u, i) => Object.assign({ upgrade: u }, L.cards[i]));
+  }
+  function shopGridTopY() { return shopGeom().top; }
+  function shopLeaveRect() { return shopGeom().leave; }
+  function shopPageArrowRects() {
+    const L = shopGeom();
+    const topY = L.top;
+    const c0 = L.cards[0], c3 = L.cards[3];
+    const gridH = c3.y + c3.h - topY;
+    const gridHalfW = (c3.x + c3.w - c0.x) / 2;
+    // At least 44 CSS px wide, however far the canvas is scaled down.
+    const w = Math.max(Math.min(70 * UI_SCALE, W * 0.12), 44 / cssScale());
+    const h = gridH;
+    const desiredGap = 40 * UI_SCALE; // stay close to the grid on wide/desktop screens
+    const margin = 6 * UI_SCALE;      // but never get pushed off-screen on narrow ones
+
+    let prevX = W/2 - gridHalfW - desiredGap - w;
+    let nextX = W/2 + gridHalfW + desiredGap;
+    prevX = Math.max(margin, prevX);
+    nextX = Math.min(W - margin - w, nextX);
+
+    return {
+      prev: { x: prevX, y: topY, w, h },
+      next: { x: nextX, y: topY, w, h }
+    };
+  }
+
+  // Short names for "needs" labels, so every lock label fits one card row.
+  const UPGRADE_SHORT = { homing: 'MISSILE', homing2: 'MISSILE II', drone: 'DRONE', drone2: 'DRONE II' };
+  function upgradeView(u) {
+    const cost = upgradeCost(u);
+    let lockLabel;
+    if (cost === null) {
+      if (u.type === 'onetime') {
+        if (u.owned) lockLabel = 'OWNED';
+        else if (u.requires && !upgradeIsOwned(u.requires)) lockLabel = 'NEEDS ' + (UPGRADE_SHORT[u.requires] || findUpgrade(u.requires).name);
+        else lockLabel = 'OWNED';
+      }
+      else if (u.level >= u.maxLevel) lockLabel = 'MAX LEVEL';
+      else lockLabel = 'NEXT VISIT';
+    }
+    const name = u.type === 'stackable' && u.level > 0 ? u.name + ' LV' + u.level : u.name;
+    return { name, desc: u.describe(u), cost, lockLabel, icon: u.icon };
+  }
+
+  // The kit card fades a locked card to 30%, which drops its text under
+  // 4.5:1; this fade lifts locked cards to 80% (name, lock label and
+  // description all pass) while unlocked cards fade in normally.
+  const LOCKED_CARD_ALPHA = 0.8;
+
+  function drawShopUI() {
+    const a = stationShopFadeT;
+    if (a <= 0.01) return;
+    ctx.save();
+    ctx.globalAlpha = a;
+    ctx.fillStyle = COLORS.scrimShop;
+    ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+
+    // same spot/style as normal play
+    CP.drawCurrency(ctx, shell.hudRight(W, UI_SCALE), 34 * UI_SCALE, currency, UI_SCALE);
+
+    const L = shopGeom();
+    const pages = totalShopPages();
+    const pageLabelY = L.top - 14 * UI_SCALE;
+
+    // The station keeper's one line, wrapped to the screen, ending above the page label.
+    if (stationShopLine) {
+      const size = 1.0 * UI_SCALE;
+      const rows = CP.wrapVectorText(stationShopLine.toUpperCase(), size, W - 40 * UI_SCALE);
+      const lineH = 12 * size + 10 * UI_SCALE;
+      let y = (pages > 1 ? pageLabelY - 28 * UI_SCALE : L.top - 20 * UI_SCALE) - (rows.length - 1) * lineH;
+      ctx.save();
+      ctx.globalAlpha = a;
+      for (const row of rows) {
+        vtext(row, W / 2, y, size, { align: 'center', color: COLORS.ink, lineWidth: 2, glow: 4 });
+        y += lineH;
+      }
+      ctx.restore();
+    }
+
+    const pageItems = currentPageUpgrades();
+    shopCardRects().forEach((card, i) => {
+      const v = upgradeView(card.upgrade);
+      const locked = v.cost === null;
+      CP.drawShopCard(ctx, card, v, {
+        currency, selected: i === stationSelectedCard, uiScale: UI_SCALE,
+        fade: locked ? a * LOCKED_CARD_ALPHA / 0.3 : a
+      });
+    });
+
+    // page arrows + indicator
+    if (pages > 1) {
+      const arrows = shopPageArrowRects();
+      ctx.save();
+      ctx.globalAlpha = a;
+      CP.drawPageArrow(ctx, arrows.prev, -1, stationSelectedCard === pageItems.length + 1);
+      CP.drawPageArrow(ctx, arrows.next, 1, stationSelectedCard === pageItems.length + 2);
+      vtext('PAGE ' + (stationShopPage + 1) + '/' + pages, W / 2, pageLabelY, 0.75 * UI_SCALE,
+        { align: 'center', color: COLORS.inkMuted, glow: 0 });
+      ctx.restore();
+    }
+
+    const lv = L.leave;
+    ctx.save();
+    ctx.globalAlpha = a;
+    CP.drawShopButton(ctx, lv, 'LEAVE', stationSelectedCard === pageItems.length, UI_SCALE);
+    ctx.restore();
+
+    if (stationShopMessageTimer > 0 && stationShopMessage) {
+      const msgAlpha = Math.min(1, stationShopMessageTimer / 30) * a;
+      const short = stationShopMessage === 'NOT ENOUGH CURRENCY';
+      const size = 1 * UI_SCALE;
+      const rows = CP.wrapVectorText(stationShopMessage, size, W - 32 * UI_SCALE);
+      ctx.save();
+      ctx.globalAlpha = msgAlpha;
+      rows.forEach((row, i) => vtext(row, W / 2, lv.y + lv.h + 40 * UI_SCALE + i * 22 * UI_SCALE, size,
+        { align: 'center', color: short ? COLORS.alert : COLORS.ink }));
+      ctx.restore();
+    }
+  }
+
+  function changeShopPage(delta) {
+    const pages = totalShopPages();
+    stationShopPage = (stationShopPage + delta + pages) % pages;
+    stationSelectedCard = 0;
+    say('Page ' + (stationShopPage + 1) + ' of ' + pages + '.');
+  }
+
+  function handleShopClick(x, y) {
+    if (stationShopFadeT < 0.8) return;
+    if (totalShopPages() > 1) {
+      const arrows = shopPageArrowRects();
+      if (inRect(x, y, touchRect(arrows.prev))) { changeShopPage(-1); return; }
+      if (inRect(x, y, touchRect(arrows.next))) { changeShopPage(1); return; }
+    }
+    const rects = shopCardRects();
+    for (let i = 0; i < rects.length; i++) {
+      const card = rects[i];
+      if (inRect(x, y, card)) {
+        stationSelectedCard = i;
+        purchaseUpgrade(card.upgrade);
+        return;
+      }
+    }
+    if (inRect(x, y, touchRect(shopLeaveRect()))) {
+      stationSelectedCard = currentPageUpgrades().length;
+      leaveStationShop();
+    }
+  }
+
+  function leaveStationShop() {
+    station = null;
+    dockingResultText = '';
+    say('Leaving the station.');
+
+    state = 'levelstart';
+    stateTimer = LEVEL_TRANSITION_FRAMES;
+    transitionShip = { startX: ship.x, startY: ship.y, startAngle: ship.angle };
+    ship.vx = 0;
+    ship.vy = 0;
+    ship.scale = 1;
+    warpIntensity = 0;
+    particles = [];
+    trail = [];
+    levelSpawnedThisTransition = false;
+    activeBuff = null;
+    warpStreaks = [];
+    warpSpawnAccumulator = 3;
+    bullets = [];
+    saucerBullets = [];
+    pickups = [];
+    missiles = [];
+    pendingStationVisit = false; // startLevel() runs at the normal point in the levelstart sequence
+  }
+  // ---------- Draw ----------
+  // The field shows from the first start until the run ends (and frozen
+  // behind PAUSED); title and result screens sit on empty space, as before.
+  let fieldVisible = false;
+
+  function draw() {
+    ctx.fillStyle = sky.color();
+    ctx.fillRect(0, 0, W, H);
+    const focus = fieldVisible && ship;
+    scopeGrid.draw(ctx, W, H, focus ? ship.x : undefined, focus ? ship.y : undefined);
+    drawStars();
+
+    if (fieldVisible) {
+      if (state === 'levelstart' && !CP.motionReduced()) {
+        drawWarpStreaks(warpIntensity);
+      }
+
+      if (state === 'playing' || state === 'levelstart' || state === 'gameover') {
+        drawTrail();
+        if (state !== 'gameover') drawShip();
+        drawDrones();
+        for (const a of asteroids) drawAsteroid(a);
+        drawBullets(bullets);
+        drawBullets(saucerBullets, '255,59,59');
+        drawMissiles();
+        drawParticles();
+        drawPickups();
+        drawSaucer();
+      }
+
+      if (state === 'approaching' || state === 'docked' || state === 'shop') {
+        if (state === 'approaching') drawStationEngineSmoke();
+        drawSpaceStation(station.x, station.y, station.width, station.angle, stationColor(), station.alpha);
+        if (state === 'approaching') drawStationOpeningMarker();
+        drawShip();
+      }
+    }
+
+    CP.drawVignette(ctx, W, H);
+    CP.drawPlayAreaBoundary(ctx, W, H);
+
+    if (fieldVisible && (state === 'playing' || state === 'levelstart' || state === 'approaching')) {
+      drawGameHud();
+    }
+
+    if (fieldVisible && state === 'docked' && dockingResultText) {
+      vtext(dockingResultText, 20 * UI_SCALE, H - 30 * UI_SCALE, 1.4 * UI_SCALE,
+        { color: COLORS.signal, glow: 6 });
+    }
+
+    if (fieldVisible && state === 'shop') {
+      drawShopUI();
+      // The shop is busy: dim it under the shell's own screens so their text reads.
+      if (!shell.isPlaying() && shell.state !== 'settings') {
+        ctx.fillStyle = COLORS.scrim;
+        ctx.fillRect(0, 0, W, H);
+      }
+    }
+  }
+
+  // ---------- Main loop ----------
+  function updateHeartbeat() {
+    heartbeatTimer--;
+    if (heartbeatTimer <= 0) {
+      if (heartbeatToggle) sfx.heartbeat1(); else sfx.heartbeat2();
+      heartbeatToggle = !heartbeatToggle;
+
+      const remainingRatio = initialAsteroidCount > 0
+        ? asteroids.length / initialAsteroidCount
+        : 1;
+      let frames = HEARTBEAT_MIN_FRAMES + (HEARTBEAT_MAX_FRAMES - HEARTBEAT_MIN_FRAMES) * remainingRatio;
+      if (saucer) frames *= 0.6; // extra tension while the saucer is around
+      heartbeatTimer = Math.max(HEARTBEAT_MIN_FRAMES, Math.round(frames));
+    }
+  }
+
+  // One step is one 60fps frame of the original game. Steps are paid for
+  // with shell.tick time, so pause stops them and GAME SPEED slows them.
+  function step() {
+    updateStars();
+    sky.update(level);
+    if (state === 'playing') {
+      updateShip();
+      updateBullets(bullets);
+      updateBullets(saucerBullets);
+      updateAsteroids();
+      resolveDustInteractions();
+      updateParticles();
+      updateTrail();
+      updatePickups();
+      updateMissiles();
+      updateDrones();
+      maybeSpawnSaucer();
+      updateSaucer();
+      checkCollisions();
+      if (state !== 'playing') return; // the ship was lost for good, or the wave was cleared
+      updateHeartbeat();
+      if (activeBuff) {
+        activeBuff.timer--;
+        if (activeBuff.timer <= 0) { activeBuff = null; say('Power-up over.'); }
+      }
+    } else if (state === 'levelstart') {
+      stopThrustSound();
+
+      const t = Math.min(1, Math.max(0, 1 - stateTimer / LEVEL_TRANSITION_FRAMES));
+      const half = WARP_FADE_START;
+
+      // two phases: (1) fly to center + build up speed/shrink, (2) already
+      // centered, decelerate and let the streaks fade + ship grow back out
+      let posT, decayT;
+      if (t <= half) {
+        posT = smoothstep(t / half);
+        decayT = 0;
+        warpIntensity = posT;
+      } else {
+        posT = 1;
+        decayT = smoothstep((t - half) / (1 - half));
+        warpIntensity = 1 - decayT;
+      }
+
+      if (transitionShip && ship) {
+        ship.x = lerp(transitionShip.startX, W/2, posT);
+        ship.y = lerp(transitionShip.startY, H/2, posT);
+        ship.angle = lerpAngle(transitionShip.startAngle, -Math.PI/2, posT);
+        ship.scale = t <= half
+          ? lerp(1, WARP_SHIP_MIN_SCALE, posT)
+          : lerp(WARP_SHIP_MIN_SCALE, 1, decayT);
+      }
+      // Reduced motion: no hyperspace streaks (the ship still flies to centre).
+      if (CP.motionReduced()) warpStreaks.length = 0;
+      else updateWarpStreaks(warpIntensity);
+
+      if (!levelSpawnedThisTransition && t >= WARP_ASTEROID_SPAWN_T) {
+        if (!pendingStationVisit) startLevel();
+        levelSpawnedThisTransition = true;
+      }
+      updateAsteroids();
+
+      updateParticles();
+      updateTrail();
+      stateTimer--;
+      if (stateTimer <= 0) {
+        transitionShip = null;
+        warpIntensity = 0;
+        ship.scale = 1;
+        if (pendingStationVisit) {
+          pendingStationVisit = false;
+          state = 'approaching';
+          beginStationApproach();
+          say('A station is ahead. Fly into a lit dock to trade.');
+        } else {
+          state = 'playing';
+          say('Wave ' + pad2(level) + '.');
+        }
+      }
+    } else if (state === 'approaching') {
+      updateStationArrival();
+      updateStationEnginePush();
+      updateShip();
+      checkStationHullCollision();
+      checkStationDocking();
+      updateStationEngineSmoke();
+    } else if (state === 'docked') {
+      stopThrustSound();
+      station.angle += STATION_SPIN_RATE * STATION_SPIN_MULTIPLIER;
+      if (stationDockFadeT < 1) {
+        stationDockFadeT = Math.min(1, stationDockFadeT + 0.02);
+      } else {
+        state = 'shop';
+        stationShopFadeT = 0;
+        say('Station shop. You have ' + currency + ' to spend. Arrows choose, ' +
+          shell.keyFor('fire').toLowerCase() + ' or enter buys.');
+      }
+    } else if (state === 'shop') {
+      station.angle += STATION_SPIN_RATE * STATION_SPIN_MULTIPLIER;
+      station.alpha = Math.max(0, 1 - stationShopFadeT);
+      if (stationShopFadeT < 1) stationShopFadeT = Math.min(1, stationShopFadeT + 0.035);
+      if (stationShopMessageTimer > 0 && !shell.messagesStay()) stationShopMessageTimer--;
+    }
+  }
+
+  // ---------- Hyperspace (one press; was Shift) ----------
+  function hyperspace() {
+    if (!ship || (state !== 'playing' && state !== 'approaching')) return;
+    if (ship.hyperCooldown > 0) return;
+    sfx.hyperspace();
+    ship.x = rand(0, W);
+    ship.y = rand(0, H);
+    ship.vx = 0; ship.vy = 0;
+    ship.hyperCooldown = 60;
+    ship.invincible = 60;
+  }
+
+  // HUD buttons (settings, pause, sound). The same spots as the kit's default
+  // layout; on touch screens the glyphs spread so that each hit box is a full
+  // 44 CSS px of its own. (The kit grows each box about its own centre, and
+  // at small uiScale the grown boxes overlap, so tapping pause hit sound.)
+  function hudButtons(W, H, ui) {
+    const K = CP.SHELL, bar = K.bars.wide;
+    const cap = bar.cap * ui, g = K.buttonGap * ui, cy = bar.cy * ui, b = K.button * ui;
+    const sR = W - bar.edge * ui, sL = sR - 1.25 * cap, pR = sL - g, pL = pR - 0.75 * cap, gR = pL - g, gL = gR - cap;
+    let sc = (sL + sR) / 2, pc = (pL + pR) / 2, gc = (gL + gR) / 2;
+    const min = isTouchDevice ? 44 / cssScale() : 0;
+    if (!min || (sc - pc >= min && pc - gc >= min)) {
+      const m1 = (pR + sL) / 2, m2 = (gR + pL) / 2, y = cy - b / 2;
+      return {
+        mute: { x: m1, y, w: sR + K.inset * ui - m1, h: b, cx: sc, cy },
+        pause: { x: m2, y, w: m1 - m2, h: b, cx: pc, cy },
+        settings: { x: m2 - b, y, w: b, h: b, cx: gc, cy }
+      };
+    }
+    const h = Math.max(b, min);
+    sc = Math.min(sc, W - min / 2); pc = sc - min; gc = pc - min;
+    const box = (cx) => ({ x: cx - min / 2, y: cy - h / 2, w: min, h, cx, cy });
+    return { mute: box(sc), pause: box(pc), settings: box(gc) };
+  }
+
+  // ---------- Shell: the frame around the game ----------
+  const sky = CP.createHueSky(); // space-hue-start, +60 every three waves
+  let stepAcc = 0;
+
+  shell = CP.createShell({
+    id: 'cp-asteroids',
+    canvas,
+    layout: 'wide',
+    title: 'ASTEROIDS',
+    howTo: ['SHOOT ROCKS AND SAUCERS', 'GATHER DUST FOR POWER, SQUARES TO SPEND', 'EVERY 4 WAVES, DOCK AT THE STATION'],
+    actions: [
+      { id: 'left', label: 'TURN LEFT', keys: ['arrowleft'], hold: true, group: 'turn' },
+      { id: 'right', label: 'TURN RIGHT', keys: ['arrowright'], hold: true, group: 'turn' },
+      { id: 'thrust', label: 'THRUST', keys: ['arrowup'], hold: true },
+      { id: 'fire', label: 'FIRE', keys: [' '], hold: true },
+      { id: 'hyper', label: 'HYPERSPACE', keys: ['arrowdown'] },
+      { id: 'drag', label: 'STEER, UP THRUSTS, CIRCLE FIRES', display: 'DRAG', fixed: true }
+    ],
+    onAction: (id) => { if (id === 'hyper') hyperspace(); },
+    steering: true,
+    buttons: hudButtons,
+    synth: syn,
+    intro: true,
+    onStart: () => {
+      resetGame();
+      state = 'playing';
+      fieldVisible = true;
+      stepAcc = 0;
+      dragPointers.clear();
+      recomputeDragInputs();
+      say('Wave 01. ' + lives + ' ships.');
+    },
+    onPause: () => { stopThrustSound(); dragPointers.clear(); recomputeDragInputs(); },
+    onEnd: () => { stopThrustSound(); fieldVisible = false; dragPointers.clear(); recomputeDragInputs(); },
+    onMute: (muted) => { if (muted) stopThrustSound(); }
+  });
+
+  function frame(now) {
+    const dt = shell.tick(now);
+    if (dt) {
+      stepAcc = Math.min(stepAcc + dt * 60, 4);
+      while (stepAcc >= 0.999 && shell.isPlaying()) {
+        step();
+        stepAcc -= 1;
+      }
+    }
+    if (!shell.isPlaying()) stopThrustSound();
+    if (shell.isPlaying()) shell.setScore(score);
+    draw();
+    shell.draw(ctx, W, H, UI_SCALE);
+    requestAnimationFrame(frame);
+  }
+
+  resizeCanvas();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,28 @@
+/* Classic Plus DOM chrome. Class names are prefixed cp- ; values match the two games' stylesheets. */
+.cp-root { background: var(--void); color: var(--ink); font-family: var(--font-mono); }
+body { margin: 0; background: var(--void); color: var(--ink); font-family: var(--font-mono); }
+
+/* Portrait stage (Breakout): one centred column, canvas + one hint line. */
+.cp-page { margin: 0; height: 100%; display: flex; align-items: center; justify-content: center; overflow: hidden; overscroll-behavior: none; background: var(--field-night); font-family: var(--font-mono); }
+.cp-stage-portrait { display: flex; flex-direction: column; align-items: center; gap: var(--space-8); width: min(94vw, 420px); max-height: 100vh; box-sizing: border-box; padding: var(--space-8) 0; }
+.cp-holder { position: relative; width: 100%; max-height: 84vh; display: flex; justify-content: center; }
+.cp-canvas-portrait { display: block; width: 100%; height: auto; max-height: 84vh; aspect-ratio: 420 / 640; background: var(--field-night);
+  border: 2px solid var(--frame); box-shadow: var(--halo-phosphor); touch-action: none; cursor: none; }
+.cp-layer { position: absolute; inset: 0; pointer-events: none; }
+.cp-vignette { position: absolute; inset: 0; pointer-events: none; background: radial-gradient(ellipse at center, rgba(0,0,0,0) 45%, rgba(0,0,0,0.75) 100%); transition: opacity 0.3s linear; }
+.cp-hint { color: var(--ink); font-size: clamp(10px, 2.8vw, 13px); opacity: 0.55; text-align: center; letter-spacing: 1px; }
+
+/* Wide stage (Asteroids): the canvas matches the window up to 1000x800, letterboxed in void. */
+.cp-stage-wide { position: relative; width: 100vw; height: 100vh; height: 100dvh; display: flex; align-items: center; justify-content: center; background: var(--void); }
+.cp-canvas-wide { display: block; max-width: 100%; max-height: 100%; background: var(--field-space); touch-action: none; }
+
+/* Intro: the boot card every game opens on. */
+.cp-intro { position: fixed; inset: 0; z-index: 1000; background-color: var(--void);
+  background-image: linear-gradient(var(--grid-intro) 1px, transparent 1px), linear-gradient(90deg, var(--grid-intro) 1px, transparent 1px);
+  background-size: var(--intro-grid) var(--intro-grid);
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: var(--space-22); cursor: pointer; transition: opacity 0.5s ease; }
+.cp-intro--inline { position: absolute; z-index: 1; }
+.cp-intro svg { width: clamp(140px, 42vw, 220px); height: auto; display: block; }
+.cp-intro-hint { display: block; opacity: 0.5; }
+.cp-intro:focus-visible { outline: 2px solid var(--signal); outline-offset: -4px; }
+@media (prefers-reduced-motion: reduce) { .cp-intro, .cp-vignette { transition: none; } }

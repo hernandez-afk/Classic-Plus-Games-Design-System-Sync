@@ -1,0 +1,1889 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>BREAKOUT</title>
+<style>
+  :root {
+    --bg: #14120c;
+    --fg: #f5f5f5;
+    --dim: #4a4a4a;
+    --accent: #39ff88;
+  }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'Courier New', Courier, monospace;
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+  #wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    width: min(94vw, 420px);
+    max-height: 100vh;
+    box-sizing: border-box;
+    padding: 8px 0;
+  }
+  #canvasHolder {
+    position: relative;
+    width: 100%;
+    max-height: 84vh;
+    display: flex;
+    justify-content: center;
+  }
+  canvas {
+    background: var(--bg);
+    border: 2px solid var(--dim);
+    box-shadow: 0 0 24px rgba(57,255,136,0.08);
+    touch-action: none;
+    cursor: none;
+    width: 100%;
+    height: auto;
+    max-height: 84vh;
+    aspect-ratio: 420 / 640;
+    display: block;
+  }
+  #msg {
+    color: var(--fg);
+    font-size: clamp(10px, 2.8vw, 13px);
+    opacity: 0.55;
+    text-align: center;
+    letter-spacing: 1px;
+  }
+  #vignette {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: radial-gradient(ellipse at center, rgba(0,0,0,0) 45%, rgba(0,0,0,0.75) 100%);
+    transition: opacity 0.3s linear;
+  }
+  #hud {
+    position: absolute;
+    inset: 0;
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    pointer-events: none;
+  }
+  #introScreen {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    background-color: #000;
+    background-image:
+      linear-gradient(rgba(245,245,245,0.05) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(245,245,245,0.05) 1px, transparent 1px);
+    background-size: 36px 36px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 22px;
+    cursor: pointer;
+    transition: opacity 0.5s ease;
+  }
+  #introScreen svg {
+    width: clamp(140px, 42vw, 220px);
+    height: auto;
+    display: block;
+  }
+  #introHintCanvas {
+    display: block;
+    opacity: 0.5;
+  }
+</style>
+</head>
+<body>
+<div id="introScreen">
+  <svg viewBox="0 0 65.702026 69.048576" xmlns="http://www.w3.org/2000/svg">
+    <g transform="translate(-88.264707,-124.80106)">
+      <path fill="#f5f5f5" d="m 98.150911,175.37773 c 0.0161,-0.0666 0.87711,-3.13534 1.913439,-6.81936 1.47752,-5.25239 1.91772,-6.76223 2.03935,-6.9948 0.18769,-0.35887 0.53653,-0.69313 0.83109,-0.79632 0.29152,-0.10212 0.82051,-0.13368 1.16172,-0.0693 0.52041,0.0982 0.88114,0.38526 1.14519,0.91133 0.103,0.20521 0.58973,1.90719 3.26432,11.41456 l 0.68969,2.45163 -1.11691,0.0117 c -0.6143,0.006 -1.12499,0.003 -1.13486,-0.006 -0.01,-0.01 -0.25025,-0.85241 -0.53418,-1.87231 l -0.51623,-1.85436 -2.23336,-0.0114 -2.23336,-0.0114 -0.24844,0.88693 c -0.13663,0.4878 -0.37161,1.33018 -0.52217,1.87195 l -0.27374,0.98503 -1.130369,0.0117 -1.13037,0.0117 z m 7.102449,-5.86716 c -0.0453,-0.21645 -1.55763,-5.44996 -1.58194,-5.47427 -0.013,-0.013 -0.0311,-0.0155 -0.0402,-0.006 -0.009,0.0101 -0.36457,1.23969 -0.78992,2.73255 -0.42536,1.49288 -0.7837,2.74879 -0.79632,2.79092 -0.0216,0.072 0.075,0.0766 1.60531,0.0766 h 1.62825 z m 5.48662,-0.33929 v -6.32609 h -1.53227 -1.53227 v -1.09447 -1.09448 h 4.18091 4.18091 v 1.09392 1.09392 l -1.54322,0.0115 -1.54321,0.0115 -0.0111,6.31514 -0.0111,6.31514 h -1.09433 -1.09433 z m 3.94012,6.29236 c 0,-0.0194 0.85628,-3.07795 1.90284,-6.79683 1.41444,-5.02609 1.94268,-6.84222 2.05803,-7.07562 0.1864,-0.37716 0.53202,-0.71522 0.84235,-0.82394 0.29151,-0.10212 0.8205,-0.13368 1.16171,-0.0693 0.51978,0.0981 0.88119,0.38535 1.14427,0.90952 0.0632,0.12588 0.2806,0.8154 0.48316,1.53227 0.20256,0.71686 1.0603,3.7617 1.90609,6.76631 0.84578,3.00461 1.54887,5.49181 1.56241,5.52712 0.0212,0.0554 -0.13191,0.0642 -1.11747,0.0642 h -1.1421 l -0.0279,-0.11105 c -0.0153,-0.0611 -0.24919,-0.90328 -0.51969,-1.87156 l -0.49181,-1.76051 -2.2038,-0.0114 c -1.29652,-0.007 -2.22035,0.005 -2.244,0.0288 -0.0221,0.0221 -0.27038,0.8645 -0.55172,1.87197 l -0.51152,1.83177 -1.12543,0.0117 c -0.61899,0.006 -1.12544,-0.004 -1.12544,-0.0235 z m 7.12146,-5.95307 c -0.0507,-0.23967 -1.55285,-5.4455 -1.57872,-5.47137 -0.0146,-0.0146 -0.0336,-0.0184 -0.0422,-0.008 -0.009,0.01 -0.36423,1.23968 -0.79023,2.73255 -0.42598,1.49286 -0.78471,2.74878 -0.79716,2.79092 -0.0213,0.072 0.0755,0.0766 1.60561,0.0766 h 1.62825 z m 5.18125,-0.59102 c 5.7e-4,-7.10958 -0.006,-6.9028 0.23273,-7.37334 0.1327,-0.26187 0.44784,-0.56061 0.71697,-0.67966 0.38998,-0.17251 0.78179,-0.20717 2.36007,-0.20878 1.13347,-0.001 1.58406,0.0142 1.86834,0.0638 1.3008,0.22684 2.36449,1.0354 2.91793,2.21804 0.61232,1.30848 0.56384,3.26556 -0.11145,4.49818 -0.33466,0.61086 -0.74461,1.01649 -1.45098,1.43566 -0.57299,0.34003 -0.70429,0.43714 -0.80238,0.59342 -0.10796,0.17201 -0.0899,0.42137 0.0505,0.69646 0.051,0.10001 0.86048,1.33316 1.79879,2.74032 0.93831,1.40716 1.69973,2.56303 1.69205,2.56859 -0.008,0.006 -0.5853,0.001 -1.28358,-0.009 l -1.26959,-0.0196 -1.71366,-2.58875 c -0.94251,-1.42382 -1.75667,-2.67467 -1.80925,-2.77968 -0.32636,-0.65171 -0.24151,-1.52054 0.19046,-1.95048 0.12986,-0.12924 0.3318,-0.2461 0.72132,-0.41743 0.93756,-0.41235 1.44385,-0.77396 1.80857,-1.29173 0.29565,-0.41971 0.40631,-0.79266 0.40328,-1.35916 -0.006,-1.19058 -0.53134,-1.94261 -1.49937,-2.14779 -0.19654,-0.0417 -0.59126,-0.0618 -1.22202,-0.0623 -1.04417,-5.7e-4 -1.17252,0.0254 -1.32179,0.27023 -0.0875,0.14352 -0.0884,0.20377 -0.0885,6.26305 l -1.6e-4,6.11814 h -1.09448 -1.09448 l 5.7e-4,-6.57782 z m 10.55001,-0.84275 v -7.42056 h 1.09448 1.09448 v 7.42056 7.42057 h -1.09448 -1.09448 z m 3.21468,-8.02878 c -0.63804,-0.28978 -0.70191,-1.18152 -0.11352,-1.58469 0.12974,-0.0889 0.20675,-0.10549 0.48927,-0.10549 0.29487,0 0.35634,0.0145 0.50989,0.12099 0.4443,0.3079 0.52764,0.93252 0.17763,1.33116 -0.26844,0.30573 -0.70101,0.40257 -1.06327,0.23803 z m 0.59852,-0.0552 c 0.39237,-0.13309 0.58548,-0.42079 0.55601,-0.82834 -0.0394,-0.54536 -0.57629,-0.8819 -1.07463,-0.67368 -0.31592,0.132 -0.49271,0.4026 -0.49271,0.75415 0,0.35533 0.21402,0.6234 0.61291,0.76767 0.10993,0.0398 0.24216,0.0332 0.39842,-0.0198 z m -0.57354,-0.75945 v -0.54723 h 0.25431 c 0.3216,0 0.41989,0.0667 0.41989,0.28507 0,0.11905 -0.028,0.1867 -0.10229,0.24682 -0.0925,0.0749 -0.0959,0.09 -0.0359,0.15853 0.0664,0.0757 0.20825,0.33462 0.20825,0.37999 0,0.0132 -0.0294,0.0241 -0.0653,0.0241 -0.0359,0 -0.12644,-0.10835 -0.20118,-0.24078 -0.0903,-0.16002 -0.16386,-0.24079 -0.21927,-0.24079 -0.0719,0 -0.0834,0.0332 -0.0834,0.24079 0,0.21159 -0.0106,0.24078 -0.0876,0.24078 -0.0829,0 -0.0875,-0.0292 -0.0875,-0.54724 z m 0.45655,-0.0907 c 0.15376,-0.15375 0.0424,-0.36899 -0.191,-0.36899 -0.0793,0 -0.0904,0.0269 -0.0904,0.21889 0,0.20259 0.008,0.2189 0.10632,0.2189 0.0585,0 0.13727,-0.0309 0.17511,-0.0688 z M 98.700721,155.1445 v -2.49092 l 0.29551,-0.0502 c 0.92506,-0.15724 2.302759,-0.56957 3.237019,-0.96878 2.9739,-1.27077 5.61456,-3.61997 7.81705,-6.95428 0.59811,-0.90546 1.19701,-2.27502 1.63106,-3.72992 1.07647,-3.60821 1.68337,-8.84555 1.68493,-14.54043 l 4.5e-4,-1.60888 h 1.25488 1.25489 l -0.029,3.81973 c -0.0636,8.37432 -0.29192,11.88615 -0.96953,14.91204 -0.57113,2.55038 -1.70301,4.9927 -3.15763,6.81336 -0.48272,0.60419 -1.89158,2.01971 -2.55641,2.56847 -2.59295,2.14031 -5.46102,3.63964 -8.34906,4.36463 -0.6404,0.16076 -1.738319,0.35613 -2.001339,0.35613 h -0.11281 z m 18.168349,-13.92626 v -16.41715 h 2.38596 2.38596 v 16.41718 16.41718 h -2.38596 -2.38596 z m 22.19602,16.34527 c -4.57629,-0.69678 -9.82575,-3.89642 -12.67601,-7.72625 -1.20937,-1.62501 -2.25666,-4.0189 -2.77474,-6.34251 -0.6868,-3.08034 -0.96396,-7.68775 -0.96584,-16.056 l -5.7e-4,-2.63769 h 1.24771 1.24771 v 1.78462 c 0,8.1359 1.21445,14.84359 3.26522,18.03452 1.18712,1.84712 2.80938,3.66835 4.40712,4.94766 1.90651,1.52656 4.33834,2.62838 6.69816,3.03483 l 0.29551,0.0509 v 2.49092 2.49092 l -0.16417,-0.005 c -0.0903,-0.002 -0.35133,-0.0328 -0.58008,-0.0676 z"/>
+      <path fill="#f5f5f5" d="m 93.572536,191.32601 -1.326956,1.32696 h -2.653913 l -1.326956,-1.32696 v -2.65391 l 1.326956,-1.32696 h 2.653913 l 1.326956,1.32696 v 0.44232 h -1.769275 v -0.88464 h -1.769275 v 3.53855 h 1.769275 v -0.88464 h 1.769275 z m 7.077104,1.32696 h -5.307829 v -5.30783 h 1.769275 v 4.42319 h 3.538554 z m 7.0771,0 h -1.76928 v -0.88464 h -1.76927 v 0.88464 h -1.76928 v -3.09623 l 2.21159,-2.2116 h 0.88464 l 2.2116,2.2116 z m -1.76928,-1.76928 v -1.76927 h -1.76927 v 1.76927 z m 8.84638,0.44232 -1.32696,1.32696 h -3.09623 v -0.88464 h 2.65391 v -1.76927 h -2.21159 l -1.32696,-1.32696 1.32696,-1.32696 h 3.09623 v 0.88464 h -2.65391 v 0.88464 h 2.21159 l 1.32696,1.32696 z m 7.0771,0 -1.32696,1.32696 h -3.09623 v -0.88464 h 2.65391 v -1.76927 h -2.21159 l -1.32696,-1.32696 1.32696,-1.32696 h 3.09623 v 0.88464 h -2.65391 v 0.88464 h 2.21159 l 1.32696,1.32696 z m 7.07709,1.32696 h -5.30782 v -0.88464 h 1.76927 v -3.53855 h -1.76927 v -0.88464 h 5.30782 v 0.88464 h -1.76927 v 3.53855 h 1.76927 z m 7.07711,-1.32696 -1.32696,1.32696 h -2.65391 l -1.32696,-1.32696 v -2.65391 l 1.32696,-1.32696 h 2.65391 l 1.32696,1.32696 v 0.44232 h -1.76928 v -0.88464 h -1.76927 v 3.53855 h 1.76927 v -0.88464 h 1.76928 z m 7.0771,0 -1.32696,1.32696 h -3.09623 v -0.88464 h 2.65391 v -1.76927 h -2.21159 l -1.32696,-1.32696 1.32696,-1.32696 h 3.09623 v 0.88464 h -2.65391 v 0.88464 h 2.21159 l 1.32696,1.32696 z" aria-label="CLASSICS"/>
+      <path fill="#f5f5f5" d="m 153.96671,190.76919 h -3.08045 v 3.08045 h -3.08045 v -3.08045 h -3.08045 v -1.54023 h 3.08045 v -3.08045 h 3.08045 v 3.08045 h 3.08045 z" aria-label="+"/>
+    </g>
+  </svg>
+  <canvas id="introHintCanvas"></canvas>
+</div>
+<div id="wrap">
+  <div id="canvasHolder">
+    <canvas id="game" width="420" height="640"></canvas>
+    <div id="vignette"></div>
+    <canvas id="hud" width="420" height="640"></canvas>
+  </div>
+  <div id="msg">drag to move — press 1-5 to test a level</div>
+</div>
+
+<script>
+/**
+ * Asteroids Vector Font — plain Canvas 2D, no dependencies.
+ * The original 1979 Atari Asteroids arcade font, designed by Ed Logg.
+ * Data preserved/reverse-engineered by Trammell Hudson: https://trmm.net/Asteroids_font/
+ */
+const VECTOR_FONT = {
+  "0": [[0,0],[8,0],[8,12],[0,12],[0,0],[8,12],"FONT_LAST"],
+  "1": [[4,0],[4,12],[3,10],"FONT_LAST"],
+  "2": [[0,12],[8,12],[8,7],[0,5],[0,0],[8,0],"FONT_LAST"],
+  "3": [[0,12],[8,12],[8,0],[0,0],"FONT_UP",[0,6],[8,6],"FONT_LAST"],
+  "4": [[0,12],[0,6],[8,6],"FONT_UP",[8,12],[8,0],"FONT_LAST"],
+  "5": [[0,0],[8,0],[8,6],[0,7],[0,12],[8,12],"FONT_LAST"],
+  "6": [[0,12],[0,0],[8,0],[8,5],[0,7],"FONT_LAST"],
+  "7": [[0,12],[8,12],[8,6],[4,0],"FONT_LAST"],
+  "8": [[0,0],[8,0],[8,12],[0,12],[0,0],"FONT_UP",[0,6],[8,6],"FONT_LAST"],
+  "9": [[8,0],[8,12],[0,12],[0,7],[8,5],"FONT_LAST"],
+  "A": [[0,0],[0,8],[4,12],[8,8],[8,0],"FONT_UP",[0,4],[8,4],"FONT_LAST"],
+  "B": [[0,0],[0,12],[4,12],[8,10],[4,6],[8,2],[4,0],[0,0],"FONT_LAST"],
+  "C": [[8,0],[0,0],[0,12],[8,12],"FONT_LAST"],
+  "D": [[0,0],[0,12],[4,12],[8,8],[8,4],[4,0],[0,0],"FONT_LAST"],
+  "E": [[8,0],[0,0],[0,12],[8,12],"FONT_UP",[0,6],[6,6],"FONT_LAST"],
+  "F": [[0,0],[0,12],[8,12],"FONT_UP",[0,6],[6,6],"FONT_LAST"],
+  "G": [[6,6],[8,4],[8,0],[0,0],[0,12],[8,12],"FONT_LAST"],
+  "H": [[0,0],[0,12],"FONT_UP",[0,6],[8,6],"FONT_UP",[8,12],[8,0],"FONT_LAST"],
+  "I": [[0,0],[8,0],"FONT_UP",[4,0],[4,12],"FONT_UP",[0,12],[8,12],"FONT_LAST"],
+  "J": [[0,4],[4,0],[8,0],[8,12],"FONT_LAST"],
+  "K": [[0,0],[0,12],"FONT_UP",[8,12],[0,6],[6,0],"FONT_LAST"],
+  "L": [[8,0],[0,0],[0,12],"FONT_LAST"],
+  "M": [[0,0],[0,12],[4,8],[8,12],[8,0],"FONT_LAST"],
+  "N": [[0,0],[0,12],[8,0],[8,12],"FONT_LAST"],
+  "O": [[0,0],[0,12],[8,12],[8,0],[0,0],"FONT_LAST"],
+  "P": [[0,0],[0,12],[8,12],[8,6],[0,5],"FONT_LAST"],
+  "Q": [[0,0],[0,12],[8,12],[8,4],[0,0],"FONT_UP",[4,4],[8,0],"FONT_LAST"],
+  "R": [[0,0],[0,12],[8,12],[8,6],[0,5],"FONT_UP",[4,5],[8,0],"FONT_LAST"],
+  "S": [[0,2],[2,0],[8,0],[8,5],[0,7],[0,12],[6,12],[8,10],"FONT_LAST"],
+  "T": [[0,12],[8,12],"FONT_UP",[4,12],[4,0],"FONT_LAST"],
+  "U": [[0,12],[0,2],[4,0],[8,2],[8,12],"FONT_LAST"],
+  "V": [[0,12],[4,0],[8,12],"FONT_LAST"],
+  "W": [[0,12],[2,0],[4,4],[6,0],[8,12],"FONT_LAST"],
+  "X": [[0,0],[8,12],"FONT_UP",[0,12],[8,0],"FONT_LAST"],
+  "Y": [[0,12],[4,6],[8,12],"FONT_UP",[4,6],[4,0],"FONT_LAST"],
+  "Z": [[0,12],[8,12],[0,0],[8,0],"FONT_UP",[2,6],[6,6],"FONT_LAST"],
+  ".": [[3,0],[4,0],"FONT_LAST"],
+  ",": [[2,0],[4,2],"FONT_LAST"],
+  "-": [[2,6],[6,6],"FONT_LAST"],
+  "+": [[1,6],[7,6],"FONT_UP",[4,9],[4,3],"FONT_LAST"],
+  "!": [[4,0],[3,2],[5,2],[4,0],"FONT_UP",[4,4],[4,12],"FONT_LAST"],
+  "#": [[0,4],[8,4],[6,2],[6,10],[8,8],[0,8],[2,10],[2,2],"FONT_LAST"],
+  "^": [[2,6],[4,12],[6,6],"FONT_LAST"],
+  "=": [[1,4],[7,4],"FONT_UP",[1,8],[7,8],"FONT_LAST"],
+  "*": [[0,0],[4,12],[8,0],[0,8],[8,8],[0,0],"FONT_LAST"],
+  "_": [[0,0],[8,0],"FONT_LAST"],
+  "/": [[0,0],[8,12],"FONT_LAST"],
+  "\\": [[0,12],[8,0],"FONT_LAST"],
+  "@": [[8,4],[4,0],[0,4],[0,8],[4,12],[8,8],[4,4],[3,6],"FONT_LAST"],
+  "$": [[6,2],[2,6],[6,10],"FONT_UP",[4,12],[4,0],"FONT_LAST"],
+  "&": [[8,0],[4,12],[8,8],[0,4],[4,0],[8,4],"FONT_LAST"],
+  "[": [[6,0],[2,0],[2,12],[6,12],"FONT_LAST"],
+  "]": [[2,0],[6,0],[6,12],[2,12],"FONT_LAST"],
+  "(": [[6,0],[2,4],[2,8],[6,12],"FONT_LAST"],
+  ")": [[2,0],[6,4],[6,8],[2,12],"FONT_LAST"],
+  "%": [[0,0],[8,12],"FONT_UP",[2,10],[2,8],"FONT_UP",[6,4],[6,2],"FONT_LAST"],
+  "<": [[6,0],[2,6],[6,12],"FONT_LAST"],
+  ">": [[2,0],[6,6],[2,12],"FONT_LAST"],
+  "|": [[4,0],[4,5],"FONT_UP",[4,6],[4,12],"FONT_LAST"],
+  ":": [[4,9],[4,7],"FONT_UP",[4,5],[4,3],"FONT_LAST"],
+  ";": [[4,9],[4,7],"FONT_UP",[4,5],[1,2],"FONT_LAST"],
+  "'": [[2,6],[6,10],"FONT_LAST"],
+  "?": [[0,8],[4,12],[8,8],[4,4],"FONT_UP",[4,1],[4,0],"FONT_LAST"],
+  " ": ["FONT_LAST"]
+};
+
+function drawVectorChar(ctx, ch, x, y, size) {
+  const pts = VECTOR_FONT[ch];
+  if (!pts) return;
+  let penUp = true;
+  ctx.beginPath();
+  for (const pt of pts) {
+    if (pt === 'FONT_LAST') break;
+    if (pt === 'FONT_UP') { penUp = true; continue; }
+    const sx = x + pt[0] * size;
+    const sy = y - pt[1] * size; // font is y-up internally; canvas is y-down
+    if (penUp) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
+    penUp = false;
+  }
+  ctx.stroke();
+}
+
+function drawVectorText(ctx, str, x, y, size, opts) {
+  opts = opts || {};
+  const color = opts.color || '#fff';
+  const align = opts.align || 'left';
+  str = String(str).toUpperCase();
+  const charWidth = 12 * size;
+  const totalWidth = str.length * charWidth;
+  let startX = x;
+  if (align === 'center') startX = x - totalWidth / 2;
+  else if (align === 'right') startX = x - totalWidth;
+
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.shadowColor = color;
+  ctx.shadowBlur = opts.glow !== undefined ? opts.glow : 0;
+  ctx.lineWidth = opts.lineWidth || 2;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  for (let i = 0; i < str.length; i++) {
+    drawVectorChar(ctx, str[i], startX + i * charWidth, y, size);
+  }
+  ctx.restore();
+}
+</script>
+<script>
+(function(){
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  const hudCanvas = document.getElementById('hud');
+  const hudCtx = hudCanvas.getContext('2d');
+  const vignetteEl = document.getElementById('vignette');
+
+  const PADDLE_W = 70, PADDLE_H = 20;
+  const BALL_SIZE = 14;
+  const PLAYER_REST_Y = H - 60 - PADDLE_H;
+  const STARTING_LIVES = 3;
+  const BALL_BREAKTHROUGH_SPEED = 13; // a ball moving at least this fast punches through bricks instead of bouncing
+  const BALL_BREAKTHROUGH_MAX = 2; // punches through at most this many bricks before the next one forces a bounce
+  const POST_POINT_DELAY_MS = 500; // brief pause used by the level-test shortcut before auto-launching
+  const AREA_COMPLETE_PAUSE_MS = 1300; // "AREA COMPLETE" shows for this long before the player can launch the next level
+
+  let playerX = W/2 - PADDLE_W/2;
+  let playerY = PLAYER_REST_Y;
+  let score = 0;
+  let lives = STARTING_LIVES;
+  let level = 1;
+  let comboMultiplier = 0; // 0 = no active combo; increments each brick broken while the previous combo window is still open
+  let comboWindowEnd = 0;
+  let prevPlayerX = playerX;
+  let prevPlayerY = playerY;
+
+  function makeBall(x, y){
+    return { x, y, vx: 0, vy: 0, speed: 5.4, spin: 0, breakStreak: 0, powerColor: null, smoothedVX: 0, smoothedVY: 0 };
+  }
+  let balls = [makeBall(W/2, PLAYER_REST_Y - BALL_SIZE - 2)];
+
+  // Dormant balls: three inert balls sitting just above the top row,
+  // packed tightly together in the center. Any active ball that touches
+  // one wakes it up into a full participant - it bounces off the
+  // striking ball too, and flies away in whatever direction the impact
+  // pushed it, so the outcome depends on how (and from where) it got hit.
+  let dormantBalls = []; // { x, y, w, h }
+  const DORMANT_BALL_COUNT = 3;
+  const DORMANT_BALL_GAP = 2;
+  const WAKE_MIN_VY_FRACTION = 0.55; // minimum |vertical component| of a wake-up direction, so it's never near-horizontal
+  const WAKE_SPEED_FACTOR = 0.6; // a woken ball starts at this fraction of the striking ball's speed
+
+  function spawnDormantBalls(){
+    dormantBalls = [];
+    const totalWidth = DORMANT_BALL_COUNT * BALL_SIZE + (DORMANT_BALL_COUNT - 1) * DORMANT_BALL_GAP;
+    let x = W/2 - totalWidth/2;
+    const y = BRICK_TOP - BALL_SIZE - 6;
+    for (let i = 0; i < DORMANT_BALL_COUNT; i++) {
+      dormantBalls.push({ x, y, w: BALL_SIZE, h: BALL_SIZE });
+      x += BALL_SIZE + DORMANT_BALL_GAP;
+    }
+  }
+
+  // Audio: minimalist, old-arcade-style synthesis via plain Web Audio -
+  // no samples, just oscillators and gain envelopes. All the tunable
+  // numbers live in SOUND below (rather than being hardcoded inside each
+  // play function), tuned by ear in the sound-tweaking branch.
+  let audioCtx = null;
+  let masterGain = null;
+  let pingDelay = null;
+  let pingFeedback = null;
+  let pingWetGain = null;
+  let audioReady = false;
+
+  const PING_SCALE = [220.00, 246.94, 261.63, 293.66, 329.63, 349.23, 392.00, 440.00]; // A3 -> A4, natural minor
+
+  let SOUND = {
+    masterGain: 0.6,
+    ping: { waveform: 'sine', filterFreq: 1270, attackMs: 1, decayMs: 70, peakGain: 0.22 },
+    echo: { enabled: true, delayMs: 200, feedback: 0.19, wet: 0.15 },
+    tap: { startFreq: 245, endFreq: 85, durationMs: 55, peakGain: 0.09 },
+    powerUp: { peakGain: 0.3, noteMs: 90, decayMs: 420 },
+    catchSfx: { peakGain: 0.28, noteMs: 110, decayMs: 350 },
+    thud: { peakGain: 0.16, decayMs: 100 },
+    crack: { peakGain: 0.17, decayMs: 30 },
+  };
+
+  function initAudio(){
+    if (audioReady) return;
+    audioReady = true;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    audioCtx = new AC();
+    masterGain = audioCtx.createGain();
+    masterGain.gain.value = SOUND.masterGain;
+    masterGain.connect(audioCtx.destination);
+
+    // Echo bus for the ping - a simple feedback delay line: each repeat
+    // is quieter than the last (feedback < 1), fading out naturally.
+    pingDelay = audioCtx.createDelay(1.0);
+    pingDelay.delayTime.value = SOUND.echo.delayMs / 1000;
+    pingFeedback = audioCtx.createGain();
+    pingFeedback.gain.value = SOUND.echo.feedback;
+    pingWetGain = audioCtx.createGain();
+    pingWetGain.gain.value = SOUND.echo.enabled ? SOUND.echo.wet : 0;
+    pingDelay.connect(pingFeedback);
+    pingFeedback.connect(pingDelay);
+    pingDelay.connect(pingWetGain);
+    pingWetGain.connect(masterGain);
+  }
+
+  function resumeAudio(){
+    if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+  }
+
+  function playThud(){
+    if (!audioReady || !audioCtx) return;
+    const now = audioCtx.currentTime;
+    const s = SOUND.thud;
+    const decay = s.decayMs / 1000;
+    const osc = audioCtx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(110, now);
+    osc.frequency.exponentialRampToValueAtTime(70, now + decay * 0.8);
+    const gain = audioCtx.createGain();
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.linearRampToValueAtTime(s.peakGain, now + 0.005);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + decay);
+    osc.connect(gain);
+    gain.connect(masterGain);
+    osc.start(now);
+    osc.stop(now + decay + 0.02);
+  }
+
+  function playCrack(){
+    if (!audioReady || !audioCtx) return;
+    const now = audioCtx.currentTime;
+    const s = SOUND.crack;
+    const decay = s.decayMs / 1000;
+    const osc = audioCtx.createOscillator();
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(420, now);
+    osc.frequency.exponentialRampToValueAtTime(260, now + decay * 0.7);
+    const gain = audioCtx.createGain();
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.linearRampToValueAtTime(s.peakGain, now + 0.004);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + decay);
+    osc.connect(gain);
+    gain.connect(masterGain);
+    osc.start(now);
+    osc.stop(now + decay + 0.02);
+  }
+
+  function playPing(freq){
+    if (!audioReady || !audioCtx) return;
+    const now = audioCtx.currentTime;
+    const s = SOUND.ping;
+    const attack = s.attackMs / 1000;
+    const decay = s.decayMs / 1000;
+    const osc = audioCtx.createOscillator();
+    osc.type = s.waveform;
+    osc.frequency.value = freq;
+    const filter = audioCtx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = s.filterFreq;
+    const gain = audioCtx.createGain();
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.linearRampToValueAtTime(s.peakGain, now + attack);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + attack + decay);
+    osc.connect(filter);
+    filter.connect(gain);
+    gain.connect(masterGain);
+    if (pingDelay) gain.connect(pingDelay);
+    osc.start(now);
+    osc.stop(now + attack + decay + 0.02);
+  }
+
+  function playPulse(){
+    if (!audioReady || !audioCtx) return;
+    const now = audioCtx.currentTime;
+    const dur = PULSE_DURATION_MS / 1000;
+    const osc = audioCtx.createOscillator();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(80, now);
+    osc.frequency.exponentialRampToValueAtTime(600, now + dur);
+    const gain = audioCtx.createGain();
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.linearRampToValueAtTime(0.12, now + 0.05);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+    osc.connect(gain);
+    gain.connect(masterGain);
+    osc.start(now);
+    osc.stop(now + dur + 0.02);
+  }
+
+  function playCatch(){
+    if (!audioReady || !audioCtx) return;
+    const now = audioCtx.currentTime;
+    const s = SOUND.catchSfx;
+    const decay = s.decayMs / 1000;
+    const noteGap = s.noteMs / 1000;
+    const notes = [PING_SCALE[5], PING_SCALE[7]];
+    notes.forEach((freq, i) => {
+      const start = now + i * noteGap;
+      const osc = audioCtx.createOscillator();
+      osc.type = 'triangle';
+      osc.frequency.value = freq;
+      const gain = audioCtx.createGain();
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.linearRampToValueAtTime(s.peakGain, start + 0.006);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + decay);
+      osc.connect(gain);
+      gain.connect(masterGain);
+      osc.start(start);
+      osc.stop(start + decay + 0.02);
+    });
+  }
+
+  function playPowerUp(){
+    if (!audioReady || !audioCtx) return;
+    const now = audioCtx.currentTime;
+    const s = SOUND.powerUp;
+    const decay = s.decayMs / 1000;
+    const noteGap = s.noteMs / 1000;
+    const notes = [PING_SCALE[2], PING_SCALE[4], PING_SCALE[7]]; // quick ascending arpeggio
+    notes.forEach((freq, i) => {
+      const start = now + i * noteGap;
+      const osc = audioCtx.createOscillator();
+      osc.type = 'triangle';
+      osc.frequency.value = freq;
+      const gain = audioCtx.createGain();
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.linearRampToValueAtTime(s.peakGain, start + 0.008);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + decay);
+      osc.connect(gain);
+      gain.connect(masterGain);
+      osc.start(start);
+      osc.stop(start + decay + 0.02);
+    });
+  }
+
+  function playPaddleTap(intensity){
+    if (!audioReady || !audioCtx) return;
+    intensity = clamp(intensity || 0, 0, 1);
+    const now = audioCtx.currentTime;
+    const s = SOUND.tap;
+
+    // blend from a quick arcade click (intensity 0) toward a long, deep
+    // bass-drop thump (intensity 1) - lower start pitch, much lower end
+    // pitch, longer duration, a bit more punch in the gain
+    const startFreq = s.startFreq - intensity * 60;
+    const endFreq = s.endFreq - intensity * 80;
+    const duration = s.durationMs / 1000 + intensity * 0.4;
+    const peakGain = s.peakGain + intensity * 0.12;
+
+    const osc = audioCtx.createOscillator();
+    osc.type = intensity > 0.5 ? 'triangle' : 'square'; // smooths out into a thump rather than a buzz once it's a real bass drop
+    osc.frequency.setValueAtTime(startFreq, now);
+    osc.frequency.exponentialRampToValueAtTime(Math.max(endFreq, 20), now + duration * 0.8);
+
+    const gain = audioCtx.createGain();
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.linearRampToValueAtTime(peakGain, now + 0.004);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+
+    osc.connect(gain);
+    gain.connect(masterGain);
+    osc.start(now);
+    osc.stop(now + duration + 0.02);
+  }
+
+  // Brick wall layout constants. Bricks are ball-sized-plus and drawn as
+  // flat, hard-edged rectangles - no gradients, matching the rest of
+  // this CRT aesthetic. Wall content itself comes from LEVELS below.
+  const BRICK_COLS = 8;
+  const BRICK_H = 16;
+  const BRICK_GAP = 3;
+  const BRICK_ROW_GAP = 4;
+  const BRICK_TOP = 70;
+  const BRICK_SIDE_MARGIN = 20;
+  const BRICK_W = (W - 2 * BRICK_SIDE_MARGIN - (BRICK_COLS - 1) * BRICK_GAP) / BRICK_COLS;
+
+  // Sunrise background: as more of the current wall is broken, the sky
+  // behind the field gradually warms from night through indigo, purple,
+  // and orange, into a warm dawn glow. Resets back to night each time a
+  // fresh wall is built (next level), so the "sunrise" plays out again.
+  let breakableBrickCount = 1; // recomputed per level in buildBricks() - indestructible bricks and gaps don't count
+  const BG_EASE = 0.015; // how gradually the color chases the target - keep this slow
+  const BG_STOPS = [
+    { t: 0.00, color: [20, 18, 12] },   // night
+    { t: 0.30, color: [24, 26, 48] },   // deep indigo
+    { t: 0.55, color: [64, 38, 74] },   // purple dawn
+    { t: 1.00, color: [105, 160, 191] }, // light blue sky, full daylight (slightly muted)
+  ];
+  let bgProgress = 0; // eased 0..1, chases (bricks broken / total bricks)
+
+  function bgColorAt(progress){
+    progress = clamp(progress, 0, 1);
+    for (let i = 0; i < BG_STOPS.length - 1; i++) {
+      const a = BG_STOPS[i], b = BG_STOPS[i+1];
+      if (progress >= a.t && progress <= b.t) {
+        const localT = (progress - a.t) / (b.t - a.t);
+        const r = Math.round(a.color[0] + (b.color[0] - a.color[0]) * localT);
+        const g = Math.round(a.color[1] + (b.color[1] - a.color[1]) * localT);
+        const bch = Math.round(a.color[2] + (b.color[2] - a.color[2]) * localT);
+        return `rgb(${r},${g},${bch})`;
+      }
+    }
+    const last = BG_STOPS[BG_STOPS.length - 1].color;
+    return `rgb(${last[0]},${last[1]},${last[2]})`;
+  }
+
+  function updateBgProgress(){
+    const brokenCount = bricks.filter(b => b.hit).length;
+    const target = brokenCount / breakableBrickCount;
+    bgProgress += (target - bgProgress) * BG_EASE;
+  }
+
+  // Poem reveal: one line surfaces at a time as the wall comes down,
+  // spaced evenly across the whole level rather than tied to any single
+  // brick. Each line fades in, holds long enough to read, fades out,
+  // then waits in silence until enough of the wall is gone to earn the
+  // next one. Resets to the start of the poem on every fresh level.
+  const POEMS = [
+    [ // level 1
+      "of course it hurts to leave the shell.",
+      "why else would the seed wait so long?",
+      "why else would the root hold its breath",
+      "before it dares to reach?",
+      "the shell was never a prison-",
+      "it was the shape of not-yet.",
+      "growth is only rupture with a kinder name.",
+      "what breaks you open was built to."
+    ],
+    [ // level 2
+      "now the air finds what the shell forgot to hide.",
+      "this is what unshelled feels like-",
+      "wind where there used to be wall.",
+      "you did not know your own shape until it moved.",
+      "freedom is not the absence of walls.",
+      "it is what walks through the gap they left.",
+      "nothing out here promises safety.",
+      "only room to find out."
+    ]
+  ];
+  const POEM_FADE_IN_MS = 2600;
+  const POEM_HOLD_MS = 2800;
+  const POEM_FADE_OUT_MS = 2600;
+  const POEM_GAP_MS = 900; // silent beat after a line fades, before the next can begin
+  const POEM_MAX_ALPHA = 0.6;
+  const POEM_FONT_SIZE = 0.8;
+  const POEM_MAX_WIDTH = W - 2 * BRICK_SIDE_MARGIN; // same width as the brick wall itself
+  const POEM_LINE_HEIGHT = 24; // px between wrapped rows at this font size
+  const POEM_Y = H/2 - 30;
+
+  // Greedy word-wrap: the vector font is monospaced, so width is just
+  // character count * per-character width. Splits a line into as many
+  // rows as needed to stay within the wall's width - normally one, two
+  // for a long line, rarely more.
+  function wrapPoemLine(text, size){
+    const charWidth = 12 * size;
+    const maxChars = Math.max(1, Math.floor(POEM_MAX_WIDTH / charWidth));
+    const words = text.split(' ');
+    const rows = [];
+    let current = '';
+    for (const w of words) {
+      const candidate = current ? current + ' ' + w : w;
+      if (candidate.length <= maxChars || !current) {
+        current = candidate;
+      } else {
+        rows.push(current);
+        current = w;
+      }
+    }
+    if (current) rows.push(current);
+    return rows;
+  }
+
+  let currentPoemLines = POEMS[0];
+  let poemLineIndex = -1; // index of the line currently showing (or last shown)
+  let poemState = 'idle'; // 'idle' | 'in' | 'hold' | 'out' | 'wait'
+  let poemStateStart = 0;
+
+  function updatePoem(now){
+    if (poemState === 'idle') {
+      const nextIndex = poemLineIndex + 1;
+      if (nextIndex < currentPoemLines.length) {
+        const brokenCount = bricks.filter(b => b.hit).length;
+        const progress = brokenCount / breakableBrickCount;
+        const requiredProgress = nextIndex / currentPoemLines.length;
+        if (progress >= requiredProgress) {
+          poemLineIndex = nextIndex;
+          poemState = 'in';
+          poemStateStart = now;
+        }
+      }
+      return;
+    }
+    const elapsed = now - poemStateStart;
+    if (poemState === 'in' && elapsed >= POEM_FADE_IN_MS) { poemState = 'hold'; poemStateStart = now; }
+    else if (poemState === 'hold' && elapsed >= POEM_HOLD_MS) { poemState = 'out'; poemStateStart = now; }
+    else if (poemState === 'out' && elapsed >= POEM_FADE_OUT_MS) { poemState = 'wait'; poemStateStart = now; }
+    else if (poemState === 'wait' && elapsed >= POEM_GAP_MS) { poemState = 'idle'; poemStateStart = now; }
+  }
+
+  function poemAlpha(now){
+    if (poemState === 'idle' || poemLineIndex < 0) return 0;
+    const elapsed = now - poemStateStart;
+    if (poemState === 'in') return clamp(elapsed / POEM_FADE_IN_MS, 0, 1) * POEM_MAX_ALPHA;
+    if (poemState === 'hold') return POEM_MAX_ALPHA;
+    if (poemState === 'out') return clamp(1 - elapsed / POEM_FADE_OUT_MS, 0, 1) * POEM_MAX_ALPHA;
+    return 0; // 'wait'
+  }
+
+  function resetPoem(){
+    currentPoemLines = POEMS[Math.min(level - 1, POEMS.length - 1)];
+    poemLineIndex = -1;
+    poemState = 'idle';
+    poemStateStart = 0;
+  }
+
+  function drawPoem(now){
+    const alpha = poemAlpha(now);
+    if (alpha <= 0) return;
+    const rows = wrapPoemLine(currentPoemLines[poemLineIndex], POEM_FONT_SIZE);
+    const centerOffset = ((rows.length - 1) / 2) * POEM_LINE_HEIGHT;
+    hudCtx.globalAlpha = alpha;
+    for (let i = 0; i < rows.length; i++) {
+      const y = POEM_Y - centerOffset + i * POEM_LINE_HEIGHT;
+      drawVectorText(hudCtx, rows[i], W/2, y, POEM_FONT_SIZE, {
+        color: '#f5f5f5', align: 'center', glow: 0.6, lineWidth: 0.75
+      });
+    }
+    hudCtx.globalAlpha = 1;
+  }
+
+  let bricks = []; // { x, y, w, h, color, points, row, col, hit, special, type, hp?, maxHp? }
+  let colorOrb = null; // { x, y, w, h, color, spawnTime } - dropped by a special brick, sits center-screen until collected
+  let fallingBricksCaught = 0;
+  let pulse = null; // { startTime, targets: [brick|null, ...] } - column-pulse reward, set up below
+
+  // Custom test levels, painted in the companion level editor. Grid text
+  // format: one row per line, one character per brick -
+  // '.' empty, R/O/G/Y a color brick, H a hard (2-hit) brick, X an
+  // indestructible brick. Cycles through these as levels advance; press
+  // 1-4 any time to jump straight to one for testing.
+  const HARD_COLOR = '#7b4fb0';
+  const HARD_CRACK_COLOR = '#e85fa0';
+  const HARD_POINTS = 5;
+  const INDESTRUCTIBLE_COLOR = '#3a3a3a';
+  const COLOR_INFO = {
+    R: { color: '#e6483f', points: 7 },
+    O: { color: '#e69a3f', points: 5 },
+    G: { color: '#57cf6b', points: 3 },
+    Y: { color: '#e8d94a', points: 1 },
+  };
+
+  const LEVELS = [
+`RGRGGRGR
+GRRRRRRG
+GYROORYG
+RYR..RYR
+ORR..RRO
+ORROORRO
+YRORRORY
+YGOGGOGY`,
+`.OOOOOO.
+OOYYYYOO
+OHXHHXHO
+OHXHHXHO
+OHXYYXHO
+OHO..OHO
+ROOYYOOR
+.RRRRRR.`,
+`RRRRRRRR
+GGYGGYGG
+GYHYYHYG
+GYHYYHYG
+OOYOOYOO
+OOYOOYOO
+HH.HH.HH
+........`,
+`GGGGGGGG
+RRRRRRRR
+RXOOOOXR
+RXOXXOXR
+RXOOOOXR
+RRRRRRRR
+GGGGGGGG
+YYYYYYYY`,
+`........
+...RR...
+...OO...
+.X.GG.X.
+...YY...
+........
+...XX...
+........`,
+  ];
+
+  function buildBricks(){
+    bricks = [];
+    const raw = LEVELS[(level - 1) % LEVELS.length];
+    const rowsText = raw.split('\n');
+    for (let r = 0; r < rowsText.length; r++) {
+      const y = BRICK_TOP + r * (BRICK_H + BRICK_ROW_GAP);
+      const chars = rowsText[r];
+      for (let c = 0; c < chars.length; c++) {
+        const ch = chars[c];
+        if (ch === '.') continue;
+        const x = BRICK_SIDE_MARGIN + c * (BRICK_W + BRICK_GAP);
+        if (ch === 'H') {
+          bricks.push({ x, y, w: BRICK_W, h: BRICK_H, color: HARD_COLOR, points: HARD_POINTS, row: r, col: c, hit: false, special: false, type: 'hard', hp: 2, maxHp: 2 });
+        } else if (ch === 'X') {
+          bricks.push({ x, y, w: BRICK_W, h: BRICK_H, color: INDESTRUCTIBLE_COLOR, points: 0, row: r, col: c, hit: false, special: false, type: 'indestructible' });
+        } else if (COLOR_INFO[ch]) {
+          const info = COLOR_INFO[ch];
+          bricks.push({ x, y, w: BRICK_W, h: BRICK_H, color: info.color, points: info.points, row: r, col: c, hit: false, special: false, type: 'color' });
+        }
+      }
+    }
+    // One special brick per distinct color present, so every color in
+    // the level has a matching orb available somewhere in the wall.
+    const byColor = new Map();
+    for (const b of bricks) {
+      if (b.type !== 'color') continue;
+      if (!byColor.has(b.color)) byColor.set(b.color, []);
+      byColor.get(b.color).push(b);
+    }
+    for (const group of byColor.values()) {
+      const pick = group[Math.floor(Math.random() * group.length)];
+      pick.special = true;
+    }
+    breakableBrickCount = Math.max(1, bricks.filter(b => b.type !== 'indestructible').length);
+    spawnDormantBalls();
+    fallingBricksCaught = 0;
+    pulse = null;
+  }
+  buildBricks();
+
+  // Particle burst: hard-edged pixel squares that fly outward when a
+  // brick breaks - no blur, no gradients, just flat little chips, tinted
+  // to match the brick they came from. No gravity; they drift freely and
+  // linger, but get caught in a vortex whenever the ball passes near
+  // them, swirling around it before drifting free again.
+  const PARTICLE_COUNT = 44;
+  const PARTICLE_SIZE = 2;
+  const PARTICLE_JITTER = 0.6; // tiny random nudge on spawn - crumbling, not exploding
+  const PARTICLE_LIFETIME_MS = 9000; // safety cap - real removal happens once off-screen
+  const COMBO_WINDOW_MS = 1000; // bricks must break within 1s of each other to keep the chain going
+  const PARTICLE_FRICTION = 0.90; // damps the spawn jitter almost immediately
+  const PARTICLE_MIN_DRIFT_SPEED = 0.15; // floor so they never fully stop, just creep onward
+  const PARTICLE_VORTEX_RADIUS = 45; // ball must be quite close to catch a particle
+  const PARTICLE_VORTEX_STRENGTH = 0.9; // swirl acceleration at closest approach
+  const PARTICLE_VORTEX_MIN_DIST = 10; // avoids a singularity right at the ball's center
+  const PARTICLE_PADDLE_PUSH_RADIUS = 40; // paddle shoves particles within this distance of its rect
+  const PARTICLE_PADDLE_PUSH_STRENGTH = 1.1; // push acceleration at closest approach
+  const PARTICLE_PADDLE_REPEL_STRENGTH = 3.5; // stronger kick for particles that land inside the paddle
+  const PARTICLE_PADDLE_DRAG = 0.35; // fraction of the paddle's own sideways speed carried into pushed particles
+  const PARTICLE_GRAVITY = 0.05; // gentle downward pull - a slow, snowflake-like drift down
+  const PARTICLE_WEIGHT_MIN = 0.5, PARTICLE_WEIGHT_MAX = 2.2; // random per-particle mass multiplier on gravity
+  const PARTICLE_SWAY_AMP_MIN = 0.3, PARTICLE_SWAY_AMP_MAX = 0.7; // side-to-side sway amplitude
+  const PARTICLE_SWAY_SPEED_MIN = 0.0015, PARTICLE_SWAY_SPEED_MAX = 0.0035; // sway cycles per ms
+
+  let particles = []; // { x, y, vx, vy, startTime, color, weight, swayPhase, swayAmp, swaySpeed }
+
+  function spawnBurst(bx, by, bw, bh, color){
+    const now = performance.now();
+    for (let i = 0; i < PARTICLE_COUNT; i++) {
+      const weight = PARTICLE_WEIGHT_MIN + Math.random() * (PARTICLE_WEIGHT_MAX - PARTICLE_WEIGHT_MIN);
+      particles.push({
+        x: bx + Math.random() * bw,
+        y: by + Math.random() * bh,
+        vx: (Math.random() - 0.5) * PARTICLE_JITTER,
+        vy: (Math.random() - 0.5) * PARTICLE_JITTER,
+        startTime: now,
+        color: color,
+        weight: weight,
+        // heavier particles sway less, lighter ones drift more - keeps
+        // the spread believable rather than random for its own sake
+        swayPhase: Math.random() * Math.PI * 2,
+        swayAmp: (PARTICLE_SWAY_AMP_MIN + Math.random() * (PARTICLE_SWAY_AMP_MAX - PARTICLE_SWAY_AMP_MIN)) / weight,
+        swaySpeed: PARTICLE_SWAY_SPEED_MIN + Math.random() * (PARTICLE_SWAY_SPEED_MAX - PARTICLE_SWAY_SPEED_MIN)
+      });
+    }
+  }
+
+  function updateParticles(now){
+    particles = particles.filter(p => now - p.startTime < PARTICLE_LIFETIME_MS && p.y < H + PARTICLE_SIZE * 2);
+
+    const paddleVX = clamp(playerX - prevPlayerX, -MAX_PADDLE_VX_FOR_SPIN, MAX_PADDLE_VX_FOR_SPIN);
+
+    for (const p of particles) {
+      // pulled toward whichever active ball is nearest
+      let ballCenterX = null, ballCenterY = null, nearestDist = Infinity;
+      for (const b of balls) {
+        const cx = b.x + BALL_SIZE/2, cy = b.y + BALL_SIZE/2;
+        const d = (cx - p.x) * (cx - p.x) + (cy - p.y) * (cy - p.y);
+        if (d < nearestDist) { nearestDist = d; ballCenterX = cx; ballCenterY = cy; }
+      }
+
+      if (ballCenterX !== null) {
+        const dx = ballCenterX - p.x;
+        const dy = ballCenterY - p.y;
+        const dist = Math.max(PARTICLE_VORTEX_MIN_DIST, Math.sqrt(dx*dx + dy*dy));
+
+        if (dist < PARTICLE_VORTEX_RADIUS) {
+          const nx = dx / dist, ny = dy / dist;
+          const tx = -ny, ty = nx; // perpendicular to the ball direction: the swirl
+          const strength = PARTICLE_VORTEX_STRENGTH * (1 - dist / PARTICLE_VORTEX_RADIUS);
+          p.vx += (tx + nx * 0.25) * strength;
+          p.vy += (ty + ny * 0.25) * strength;
+        }
+      }
+
+      // paddle repel: particles are pushed firmly away from the paddle's
+      // rectangle. One that's merely close gets a radial push scaled by
+      // proximity; one that actually lands inside the paddle (which the
+      // proximity math alone can't push, since its direction collapses
+      // to zero right at the surface) gets hard-ejected outward from
+      // the paddle's center instead. Either way some of the paddle's
+      // own sideways motion carries into the push.
+      const paddleCenterX = playerX + PADDLE_W/2;
+      const paddleCenterY = playerY + PADDLE_H/2;
+      const inside = (p.x > playerX && p.x < playerX + PADDLE_W && p.y > playerY && p.y < playerY + PADDLE_H);
+      let pdx, pdy, pdist;
+      if (inside) {
+        pdx = p.x - paddleCenterX;
+        pdy = p.y - paddleCenterY;
+        pdist = Math.sqrt(pdx*pdx + pdy*pdy) || 0.001;
+      } else {
+        const closestX = clamp(p.x, playerX, playerX + PADDLE_W);
+        const closestY = clamp(p.y, playerY, playerY + PADDLE_H);
+        pdx = p.x - closestX;
+        pdy = p.y - closestY;
+        pdist = Math.max(PARTICLE_VORTEX_MIN_DIST, Math.sqrt(pdx*pdx + pdy*pdy));
+      }
+      if (inside || pdist < PARTICLE_PADDLE_PUSH_RADIUS) {
+        const pnx = pdx / pdist, pny = pdy / pdist;
+        const closeness = inside ? 1 : 1 - pdist / PARTICLE_PADDLE_PUSH_RADIUS;
+        const strength = inside ? PARTICLE_PADDLE_REPEL_STRENGTH : PARTICLE_PADDLE_PUSH_STRENGTH * closeness;
+        p.vx += pnx * strength + paddleVX * PARTICLE_PADDLE_DRAG * closeness;
+        p.vy += pny * strength;
+        if (inside) {
+          p.x = paddleCenterX + pnx * (PADDLE_W/2 + 2);
+          p.y = paddleCenterY + pny * (PADDLE_H/2 + 2);
+        }
+      }
+
+      p.vx *= PARTICLE_FRICTION;
+      p.vy *= PARTICLE_FRICTION;
+      p.vy += PARTICLE_GRAVITY * p.weight;
+
+      // never quite let them stop - a slow residual drift continues
+      // outward in whatever direction they were already heading.
+      const speed = Math.sqrt(p.vx*p.vx + p.vy*p.vy);
+      if (speed > 0.0001 && speed < PARTICLE_MIN_DRIFT_SPEED) {
+        const scale = PARTICLE_MIN_DRIFT_SPEED / speed;
+        p.vx *= scale;
+        p.vy *= scale;
+      }
+
+      p.x += p.vx;
+      p.y += p.vy;
+      p.x += Math.sin(now * p.swaySpeed + p.swayPhase) * p.swayAmp;
+    }
+  }
+
+  const PARTICLE_BASE_ALPHA = 0.55;
+
+  function drawParticles(now){
+    for (const p of particles) {
+      const t = (now - p.startTime) / PARTICLE_LIFETIME_MS;
+      // hold full brightness through the fall; only fade in the last
+      // stretch near the bottom edge, or if the time cap is ever reached
+      const fallFade = Math.min(1, (H + PARTICLE_SIZE * 2 - p.y) / 40);
+      const timeFade = t < 0.85 ? 1 : Math.max(0, 1 - (t - 0.85) / 0.15);
+      const alpha = Math.min(fallFade, timeFade) * PARTICLE_BASE_ALPHA;
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = p.color;
+      ctx.fillRect(p.x - PARTICLE_SIZE/2, p.y - PARTICLE_SIZE/2, PARTICLE_SIZE, PARTICLE_SIZE);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+
+  // Spin: dragging the paddle sideways as it hits the ball bends the
+  // ball's onward path. A slice of the paddle's own horizontal motion
+  // is nudged straight into the ball's velocity on impact, and a portion
+  // carries on afterward as ongoing curvature that fades over time.
+  const SPIN_IMPACT_FACTOR = 0.4; // paddle velocity -> immediate vx kick
+  const SPIN_CARRY_FACTOR = 0.6;  // paddle velocity -> lingering curve
+  const SPIN_ACCEL = 0.06;        // how strongly lingering spin bends vx per frame
+  const SPIN_DECAY = 0.97;        // spin fades out over time
+  const MAX_PADDLE_VX_FOR_SPIN = 20; // clamp on input so a huge mouse jump can't break physics
+  const PADDLE_HITBOX_PAD_PER_VX = 1.4; // extra collision width (each side) per unit of paddle speed
+  const PADDLE_HITBOX_MAX_PAD = 26; // cap on that extra width, so it stays generous rather than absurd
+  const MAX_SPIN = 6;
+  const MAX_BALL_VX = 20;
+
+  function clamp(v, min, max){ return Math.max(min, Math.min(max, v)); }
+
+  function isBallHard(b){
+    return b.speed >= BALL_BREAKTHROUGH_SPEED;
+  }
+
+  // Ball trail: while the ball is "hard" (at breakthrough speed), it
+  // sheds a short-lived trail of small, hard-edged pixels
+  // behind it, tinted to match the ball's own current color (white
+  // normally, or its charge color if it's carrying one) - a distinct
+  // effect from the brick-crumble particles, with no gravity or drift,
+  // just a quick fade.
+  const BALL_DEFAULT_COLOR = '#f5f5f5';
+  const BALL_TRAIL_SIZE = 3;
+  const BALL_TRAIL_LIFETIME_MS = 220;
+  const BALL_TRAIL_SPAWN_PER_FRAME = 3;
+
+  let ballTrail = []; // { x, y, startTime, color }
+
+  function spawnBallTrail(b){
+    const now = performance.now();
+    const color = b.powerColor || BALL_DEFAULT_COLOR;
+    for (let i = 0; i < BALL_TRAIL_SPAWN_PER_FRAME; i++) {
+      ballTrail.push({
+        x: b.x + BALL_SIZE/2 + (Math.random() - 0.5) * BALL_SIZE * 0.7,
+        y: b.y + BALL_SIZE/2 + (Math.random() - 0.5) * BALL_SIZE * 0.7,
+        startTime: now,
+        color: color
+      });
+    }
+  }
+
+  function updateBallTrail(now){
+    ballTrail = ballTrail.filter(p => now - p.startTime < BALL_TRAIL_LIFETIME_MS);
+  }
+
+  function drawBallTrail(now){
+    for (const p of ballTrail) {
+      const t = (now - p.startTime) / BALL_TRAIL_LIFETIME_MS;
+      ctx.globalAlpha = Math.max(0, 1 - t);
+      ctx.fillStyle = p.color;
+      ctx.fillRect(p.x - BALL_TRAIL_SIZE/2, p.y - BALL_TRAIL_SIZE/2, BALL_TRAIL_SIZE, BALL_TRAIL_SIZE);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // Ghost trail: a handful of hard-edged, semi-transparent copies placed
+  // behind the ball/paddle at a distance proportional to its current
+  // velocity - like a phosphor remnant on an old CRT rather than a blur.
+  const GHOST_COUNT = 5;
+  const GHOST_STEP = 1.3; // spacing multiplier per ghost, scales with speed
+  const GHOST_ALPHAS = [0.32, 0.23, 0.15, 0.09, 0.05];
+  const GHOST_MIN_SPEED = 0.4; // below this, no ghosts (treat as stationary)
+  const GHOST_VELOCITY_SMOOTHING = 0.85; // higher = ghosts linger longer after motion stops
+
+  let smoothedPlayerVX = 0, smoothedPlayerVY = 0;
+
+  function drawGhosts(x, y, w, h, vx, vy){
+    if (Math.abs(vx) < GHOST_MIN_SPEED && Math.abs(vy) < GHOST_MIN_SPEED) return;
+    for (let i = 0; i < GHOST_COUNT; i++) {
+      const dist = (i + 1) * GHOST_STEP;
+      ctx.globalAlpha = GHOST_ALPHAS[i];
+      ctx.fillRect(x - vx * dist, y - vy * dist, w, h);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  let running = false;
+  let gameOver = false;
+  let hasServedOnce = false; // so the "BREAKOUT" title only shows before the very first serve
+  let levelMessageUntil = 0;
+
+  function ballsRemainingOnWall(){
+    return bricks.some(b => !b.hit && b.type !== 'indestructible');
+  }
+
+  function resetBall(){
+    const b = makeBall(playerX + PADDLE_W/2 - BALL_SIZE/2, playerY - BALL_SIZE - 2);
+    b.speed = Math.min(5.4 + (level - 1) * 0.6, 11);
+    balls = [b];
+    colorOrb = null;
+    fallingBricks = [];
+  }
+
+  function launchBall(){
+    const b = balls[0];
+    const angle = (Math.random() * 0.7 - 0.35); // radians, slight variance from straight up
+    b.vx = Math.sin(angle) * b.speed;
+    b.vy = -Math.cos(angle) * b.speed;
+    running = true;
+    hasServedOnce = true;
+  }
+
+  function startRound(){
+    if (performance.now() < levelMessageUntil) return; // still showing "AREA COMPLETE"
+    resetBall();
+    launchBall();
+  }
+
+  const BALL_FADE_OUT_MS = 700; // how long cleared-level balls linger and fade before disappearing
+  let fadingBalls = []; // { x, y, color, startTime } - snapshotted at the moment a level clears
+
+  function nextLevel(){
+    const now = performance.now();
+    fadingBalls = balls.map(b => ({ x: b.x, y: b.y, color: b.powerColor || BALL_DEFAULT_COLOR, startTime: now }));
+    level++;
+    buildBricks();
+    particles = [];
+    resetPoem();
+    running = false;
+    levelMessageUntil = now + AREA_COMPLETE_PAUSE_MS;
+    resetBall();
+  }
+
+  // Testing shortcut: jump straight to a specific level (1-based) by
+  // pressing its number key, bypassing the normal clear-the-wall
+  // progression. Handy for trying out levels painted in the editor.
+  function jumpToLevel(n){
+    level = n;
+    gameOver = false;
+    colorOrb = null;
+    buildBricks();
+    particles = [];
+    resetPoem();
+    running = false;
+    levelMessageUntil = performance.now() + POST_POINT_DELAY_MS;
+    resetBall();
+    hasServedOnce = true;
+    setTimeout(() => { if (!gameOver) launchBall(); }, POST_POINT_DELAY_MS);
+  }
+
+  // Input: mouse / touch (horizontal movement)
+  function movePlayerTo(clientX){
+    const rect = canvas.getBoundingClientRect();
+    const scale = W / rect.width;
+    let x = (clientX - rect.left) * scale - PADDLE_W/2;
+    x = Math.max(0, Math.min(W - PADDLE_W, x));
+    playerX = x;
+  }
+  canvas.addEventListener('mousemove', (e) => {
+    movePlayerTo(e.clientX);
+  });
+  canvas.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    movePlayerTo(e.touches[0].clientX);
+  }, { passive: false });
+
+  // Input: keyboard
+  const keys = {};
+  window.addEventListener('keydown', (e) => {
+    keys[e.key] = true;
+    if (['ArrowLeft','ArrowRight',' '].includes(e.key)) e.preventDefault();
+    initAudio();
+    resumeAudio();
+    if (e.key === ' ' && !running && !gameOver) startRound();
+    if (e.key === ' ' && gameOver) resetGame();
+    const digit = parseInt(e.key, 10);
+    if (!e.repeat && digit >= 1 && digit <= LEVELS.length) jumpToLevel(digit);
+  });
+  window.addEventListener('keyup', (e) => { keys[e.key] = false; });
+
+  document.addEventListener('visibilitychange', () => {
+    if (!audioCtx) return;
+    if (document.hidden) {
+      audioCtx.suspend();
+    } else if (!gameOver) {
+      audioCtx.resume();
+    }
+  });
+  canvas.addEventListener('click', () => {
+    initAudio();
+    resumeAudio();
+    if (!running && !gameOver) startRound();
+    if (gameOver) resetGame();
+  });
+
+  function resetGame(){
+    score = 0;
+    lives = STARTING_LIVES;
+    level = 1;
+    hasServedOnce = false;
+    comboMultiplier = 0;
+    comboWindowEnd = 0;
+    gameOver = false;
+    playerX = W/2 - PADDLE_W/2;
+    prevPlayerX = playerX;
+    playerY = PLAYER_REST_Y;
+    prevPlayerY = playerY;
+    particles = [];
+    fadingBalls = [];
+    bgProgress = 0;
+    resetPoem();
+    buildBricks();
+    resetBall();
+    running = false;
+  }
+
+  function updateKeyboardPaddle(){
+    const kbSpeed = 7;
+    if (keys['ArrowLeft']) playerX -= kbSpeed;
+    if (keys['ArrowRight']) playerX += kbSpeed;
+    playerX = Math.max(0, Math.min(W - PADDLE_W, playerX));
+  }
+
+  function rectsOverlap(ax,ay,aw,ah,bx,by,bw,bh){
+    return ax < bx+bw && ax+aw > bx && ay < by+bh && ay+ah > by;
+  }
+
+  function registerBrickHit(b, forceFall){
+    b.hit = true;
+    const now = performance.now();
+    comboMultiplier = (now <= comboWindowEnd) ? comboMultiplier + 1 : 1;
+    comboWindowEnd = now + COMBO_WINDOW_MS;
+    score += b.points * comboMultiplier;
+    spawnBurst(b.x, b.y, b.w, b.h, b.color);
+    playPing(PING_SCALE[Math.floor(Math.random() * PING_SCALE.length)]);
+    if (b.special) spawnColorOrb(b.color);
+    if (forceFall || Math.random() < FALLING_BRICK_CHANCE) spawnFallingBrick(b);
+  }
+
+  // Falling bricks: any broken brick has a small chance to drop as a
+  // catchable bonus instead of just shattering - a simple falling
+  // rectangle the same size and color as the brick it came from. Catch
+  // it with the paddle for bonus points equal to its value; miss it and
+  // it just falls away, no penalty.
+  const FALLING_BRICK_CHANCE = 0.10;
+  const FALLING_BRICK_SPEED = 2.2; // px per frame
+
+  let fallingBricks = []; // { x, y, w, h, color, points }
+
+  function spawnFallingBrick(b){
+    fallingBricks.push({ x: b.x, y: b.y, w: b.w, h: b.h, color: b.color, points: b.points });
+  }
+
+  function updateFallingBricks(){
+    for (let i = fallingBricks.length - 1; i >= 0; i--) {
+      const fb = fallingBricks[i];
+      fb.y += FALLING_BRICK_SPEED;
+      if (rectsOverlap(fb.x, fb.y, fb.w, fb.h, playerX, playerY, PADDLE_W, PADDLE_H)) {
+        score += fb.points;
+        spawnBurst(fb.x, fb.y, fb.w, fb.h, fb.color);
+        playCatch();
+        fallingBricks.splice(i, 1);
+        fallingBricksCaught++;
+        if (fallingBricksCaught >= BRICK_COLS) {
+          fallingBricksCaught -= BRICK_COLS;
+          triggerColumnPulse();
+        }
+      } else if (fb.y > H) {
+        fallingBricks.splice(i, 1);
+      }
+    }
+  }
+
+  function drawFallingBricks(){
+    for (const fb of fallingBricks) {
+      ctx.fillStyle = fb.color;
+      ctx.fillRect(fb.x, fb.y, fb.w, fb.h);
+    }
+  }
+
+  // Column pulse: catching as many falling bricks as there are columns
+  // in a row charges up a reward. It has two phases, and gameplay is
+  // fully frozen for both: first the beam fades up in place (a beat of
+  // anticipation), then it sweeps from the catch meter's position up to
+  // the top, marking the lowest surviving brick in every column it
+  // passes through to fade/scale away exactly like any other pending
+  // explosion (indestructible bricks just block it for that column).
+  const PULSE_FADE_IN_MS = 400;
+  const PULSE_DURATION_MS = 1050;
+  const PULSE_THICKNESS = BRICK_H;
+  const PULSE_COLOR = '#f5f5f5';
+  const PULSE_ALPHA = 0.5;
+  const PULSE_START_Y = PLAYER_REST_Y - 10 - BRICK_H - (BRICK_H + BRICK_ROW_GAP); // same as the catch meter's position
+
+  function triggerColumnPulse(){
+    const targets = [];
+    for (let col = 0; col < BRICK_COLS; col++) {
+      let best = null;
+      for (const b of bricks) {
+        if (b.col !== col || b.hit) continue;
+        if (!best || b.y > best.y) best = b;
+      }
+      targets.push(best);
+    }
+    pulse = { phase: 'fadeIn', phaseStart: performance.now(), targets };
+  }
+
+  function updatePulse(now){
+    if (!pulse) return;
+    const elapsed = now - pulse.phaseStart;
+    if (pulse.phase === 'fadeIn') {
+      if (elapsed >= PULSE_FADE_IN_MS) {
+        pulse.phase = 'sweep';
+        pulse.phaseStart = now;
+        playPulse();
+      }
+      return; // still fading in - stationary, nothing to mark yet
+    }
+    const t = Math.min(1, elapsed / PULSE_DURATION_MS);
+    const frontY = PULSE_START_Y * (1 - t);
+    for (const target of pulse.targets) {
+      if (!target || target.hit || target.resolved || target.pendingExplode) continue;
+      if (frontY <= target.y + target.h) {
+        target.resolved = true;
+        if (target.type !== 'indestructible') {
+          target.pendingExplode = true;
+          target.pendingStart = now;
+        }
+      }
+    }
+    if (elapsed >= PULSE_DURATION_MS) pulse = null;
+  }
+
+  function drawPulse(now){
+    if (!pulse) return;
+    if (pulse.phase === 'fadeIn') {
+      const elapsed = now - pulse.phaseStart;
+      const t = Math.min(1, elapsed / PULSE_FADE_IN_MS);
+      ctx.globalAlpha = PULSE_ALPHA * t;
+      ctx.fillStyle = PULSE_COLOR;
+      ctx.fillRect(0, PULSE_START_Y - PULSE_THICKNESS/2, W, PULSE_THICKNESS);
+      ctx.globalAlpha = 1;
+      return;
+    }
+    const elapsed = now - pulse.phaseStart;
+    const t = Math.min(1, elapsed / PULSE_DURATION_MS);
+    const frontY = PULSE_START_Y * (1 - t);
+    ctx.globalAlpha = PULSE_ALPHA;
+    ctx.fillStyle = PULSE_COLOR;
+    ctx.fillRect(0, frontY - PULSE_THICKNESS/2, W, PULSE_THICKNESS);
+    ctx.globalAlpha = 1;
+  }
+
+  // Catch meter: a row of faint brick-shaped outlines just above the
+  // paddle, aligned to the same columns as the wall above. Each caught
+  // falling brick fills one slot, left to right; a full row (matching
+  // BRICK_COLS) is what triggers the pulse.
+  const METER_Y = PULSE_START_Y;
+
+  function drawCatchMeter(){
+    for (let col = 0; col < BRICK_COLS; col++) {
+      const x = BRICK_SIDE_MARGIN + col * (BRICK_W + BRICK_GAP);
+      if (col < fallingBricksCaught) {
+        ctx.fillStyle = 'rgba(245,245,245,0.3)';
+        ctx.fillRect(x, METER_Y, BRICK_W, BRICK_H);
+      } else {
+        ctx.strokeStyle = 'rgba(245,245,245,0.09)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(x + 0.5, METER_Y + 0.5, BRICK_W - 1, BRICK_H - 1);
+      }
+    }
+  }
+
+  function spawnColorOrb(color){
+    colorOrb = {
+      x: W/2 - BALL_SIZE/2,
+      y: H/2 - BALL_SIZE/2,
+      w: BALL_SIZE,
+      h: BALL_SIZE,
+      color: color,
+      spawnTime: performance.now()
+    };
+  }
+
+  // Color-chain destroy: once the ball is charged with a color (from
+  // collecting an orb), hitting a brick of that same color doesn't just
+  // break it - it flood-fills outward through every same-colored brick
+  // still connected to it (4-directionally adjacent). The brick actually
+  // struck breaks immediately, so the ball passes through cleanly right
+  // now; every other brick in the connected patch fades to white and
+  // scales up before breaking, same as the orb bonus below.
+  function colorChainDestroy(startBrick){
+    const color = startBrick.color;
+    const stack = [startBrick];
+    const seen = new Set();
+    const connected = [];
+    while (stack.length) {
+      const cur = stack.pop();
+      const key = cur.row + ',' + cur.col;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (cur.hit || cur.pendingExplode || cur.color !== color) continue;
+      connected.push(cur);
+      for (const nb of bricks) {
+        if (nb.hit || nb.pendingExplode || nb.color !== color) continue;
+        if (Math.abs(nb.row - cur.row) + Math.abs(nb.col - cur.col) === 1) {
+          stack.push(nb);
+        }
+      }
+    }
+    registerBrickHit(startBrick);
+    const now = performance.now();
+    for (const br of connected) {
+      if (br === startBrick) continue;
+      br.pendingExplode = true;
+      br.pendingStart = now;
+    }
+  }
+
+  // Orb-collection bonus: the moment the ball is charged with a color,
+  // a random 10% of that color's remaining bricks (anywhere on the
+  // wall, not just adjacent ones) are marked to fade out as a little
+  // welcome-bonus, using the same pending-explosion animation as the
+  // chain-destroy above.
+  const ORB_BONUS_FRACTION = 0.20;
+
+  const PENDING_EXPLODE_MS = 1000; // bricks marked for destruction fade to white and scale up over this long, before actually breaking
+  const PENDING_EXPLODE_MAX_SCALE = 1.5; // grows to this fraction of its normal size right before disappearing
+
+  function destroyRandomColorBricks(color, fraction){
+    const matching = bricks.filter(b => b.type === 'color' && b.color === color && !b.hit && !b.pendingExplode);
+    if (matching.length === 0) return;
+    const count = Math.min(matching.length, Math.max(1, Math.ceil(matching.length * fraction)));
+    for (let i = matching.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      const tmp = matching[i]; matching[i] = matching[j]; matching[j] = tmp;
+    }
+    const now = performance.now();
+    for (let i = 0; i < count; i++) {
+      matching[i].pendingExplode = true;
+      matching[i].pendingStart = now;
+    }
+  }
+
+  function updatePendingExplosions(now){
+    for (const b of bricks) {
+      if (b.pendingExplode && !b.hit && now - b.pendingStart >= PENDING_EXPLODE_MS) {
+        registerBrickHit(b);
+      }
+    }
+  }
+
+  function lerpColorToWhite(hex, t){
+    const r = parseInt(hex.slice(1, 3), 16);
+    const g = parseInt(hex.slice(3, 5), 16);
+    const b = parseInt(hex.slice(5, 7), 16);
+    const nr = Math.round(r + (255 - r) * t);
+    const ng = Math.round(g + (255 - g) * t);
+    const nb = Math.round(b + (255 - b) * t);
+    return 'rgb(' + nr + ',' + ng + ',' + nb + ')';
+  }
+
+  function update(){
+    if (!running) {
+      // the serve ball rides on the paddle while waiting to launch
+      if (!gameOver && balls[0]) {
+        balls[0].x = playerX + PADDLE_W/2 - BALL_SIZE/2;
+        balls[0].y = playerY - BALL_SIZE - 2;
+      }
+      return;
+    }
+
+    updateKeyboardPaddle();
+
+    if (pulse) {
+      updatePulse(performance.now());
+      return; // the whole field freezes for the pulse's fade-in and sweep
+    }
+
+    const newlyAwakened = [];
+
+    for (const ball of balls) {
+      // Apply any lingering spin from the last paddle contact: a gentle,
+      // decaying sideways pull that bends the flight path, then fades out.
+      if (ball.spin) {
+        ball.vx = clamp(ball.vx + ball.spin * SPIN_ACCEL, -MAX_BALL_VX, MAX_BALL_VX);
+        ball.spin *= SPIN_DECAY;
+        if (Math.abs(ball.spin) < 0.02) ball.spin = 0;
+      }
+
+      // Substep the ball's motion so a fast-moving ball can't tunnel
+      // past the paddle or a brick between frames.
+      const SUBSTEPS = 8;
+      let stepVX = ball.vx / SUBSTEPS;
+      let stepVY = ball.vy / SUBSTEPS;
+      let bounced = false;
+
+      for (let s = 1; s <= SUBSTEPS && !bounced; s++) {
+        ball.x += stepVX;
+        ball.y += stepVY;
+
+        // left/right walls
+        if (ball.x <= 0) { ball.x = 0; ball.vx *= -1; stepVX *= -1; ball.breakStreak = 0; }
+        if (ball.x + BALL_SIZE >= W) { ball.x = W - BALL_SIZE; ball.vx *= -1; stepVX *= -1; ball.breakStreak = 0; }
+        // top wall
+        if (ball.y <= 0) { ball.y = 0; ball.vy *= -1; stepVY *= -1; ball.breakStreak = 0; }
+
+        // interpolate the paddle's position across the frame - both axes,
+        // not just Y - since a fast sideways drag (exactly what you need
+        // for strong spin) can otherwise move the paddle past the ball's
+        // position between frames without any single check ever
+        // overlapping it, letting the ball fall straight through
+        const framePlayerX = prevPlayerX + (playerX - prevPlayerX) * (s / SUBSTEPS);
+        const framePlayerY = prevPlayerY + (playerY - prevPlayerY) * (s / SUBSTEPS);
+
+        // paddle collision - the hitbox widens a bit when the paddle is
+        // moving fast, since that's exactly when you're going for a strong
+        // top-spin and have the least margin to actually connect. Only the
+        // detection window grows; the bounce angle below still uses the
+        // paddle's true (unwidened) position, so the feel stays accurate.
+        const paddleVX = clamp(playerX - prevPlayerX, -MAX_PADDLE_VX_FOR_SPIN, MAX_PADDLE_VX_FOR_SPIN);
+        const hitboxPad = Math.min(PADDLE_HITBOX_MAX_PAD, Math.abs(paddleVX) * PADDLE_HITBOX_PAD_PER_VX);
+        if (!bounced && ball.vy > 0 && rectsOverlap(ball.x, ball.y, BALL_SIZE, BALL_SIZE, framePlayerX - hitboxPad, framePlayerY, PADDLE_W + hitboxPad * 2, PADDLE_H)) {
+          ball.y = framePlayerY - BALL_SIZE;
+          const hit = (ball.x + BALL_SIZE/2) - (framePlayerX + PADDLE_W/2);
+          const norm = clamp(hit / (PADDLE_W/2), -1, 1);
+          ball.speed = Math.min(ball.speed + 0.15, 12);
+          const angle = norm * (Math.PI/3.2);
+          ball.vx = Math.sin(angle) * ball.speed;
+          ball.vy = -Math.cos(angle) * ball.speed;
+
+          ball.vx = clamp(ball.vx + paddleVX * SPIN_IMPACT_FACTOR, -MAX_BALL_VX, MAX_BALL_VX);
+          ball.spin = clamp(paddleVX * SPIN_CARRY_FACTOR, -MAX_SPIN, MAX_SPIN);
+
+          const spinIntensity = Math.abs(paddleVX) / MAX_PADDLE_VX_FOR_SPIN;
+          playPaddleTap(spinIntensity);
+          ball.breakStreak = 0;
+          bounced = true;
+        }
+
+        // dormant-ball wake-up: the striking ball bounces off it like a
+        // solid obstacle, and the dormant ball activates - flying away
+        // from wherever the impact pushed it, so the direction depends
+        // on how (and from which side) it got hit.
+        if (!bounced) {
+          for (let di = dormantBalls.length - 1; di >= 0; di--) {
+            const db = dormantBalls[di];
+            if (!rectsOverlap(ball.x, ball.y, BALL_SIZE, BALL_SIZE, db.x, db.y, db.w, db.h)) continue;
+            const ballCX = ball.x + BALL_SIZE/2;
+            const ballCY = ball.y + BALL_SIZE/2;
+            const dbCX = db.x + db.w/2;
+            const dbCY = db.y + db.h/2;
+            const overlapX = (db.w/2 + BALL_SIZE/2) - Math.abs(ballCX - dbCX);
+            const overlapY = (db.h/2 + BALL_SIZE/2) - Math.abs(ballCY - dbCY);
+            if (overlapX < overlapY) {
+              ball.vx *= -1; stepVX *= -1;
+              ball.x = ballCX < dbCX ? db.x - BALL_SIZE : db.x + db.w;
+            } else {
+              ball.vy *= -1; stepVY *= -1;
+              ball.y = ballCY < dbCY ? db.y - BALL_SIZE : db.y + db.h;
+            }
+            bounced = true;
+            ball.breakStreak = 0;
+
+            let dx = dbCX - ballCX;
+            let dy = dbCY - ballCY;
+            const dlen = Math.sqrt(dx*dx + dy*dy) || 1;
+            dx /= dlen; dy /= dlen;
+            // guarantee a minimum vertical component - the three dormant
+            // balls sit in a tight horizontal row, so a level hit can
+            // otherwise produce an almost purely horizontal direction,
+            // and with no gravity in this game nothing would ever pull
+            // it out of an endless wall-to-wall bounce
+            if (Math.abs(dy) < WAKE_MIN_VY_FRACTION) {
+              const ySign = dy === 0 ? 1 : Math.sign(dy);
+              const xSign = dx === 0 ? (Math.random() < 0.5 ? -1 : 1) : Math.sign(dx);
+              dy = ySign * WAKE_MIN_VY_FRACTION;
+              dx = xSign * Math.sqrt(Math.max(0, 1 - dy*dy));
+            }
+            const woken = makeBall(dbCX - BALL_SIZE/2, dbCY - BALL_SIZE/2);
+            woken.speed = ball.speed * WAKE_SPEED_FACTOR;
+            woken.vx = dx * woken.speed;
+            woken.vy = dy * woken.speed;
+            newlyAwakened.push(woken);
+
+            dormantBalls.splice(di, 1);
+            playPowerUp();
+            spawnBurst(db.x, db.y, db.w, db.h, BALL_DEFAULT_COLOR);
+            break;
+          }
+        }
+
+        // brick collisions, in priority order:
+        // - indestructible: always bounces, never breaks, no exceptions.
+        // - color match (ball charged from an orb): flood-fills the
+        //   connected same-color patch and passes straight through.
+        // - hard bricks: a hit that doesn't finish them off is a forced
+        //   bounce, no matter how fast the ball is - you can't pass through
+        //   a brick that's still standing. Cracks visibly after one hit.
+        // - otherwise (a color brick, or a hard brick's finishing hit): a
+        //   normal hit bounces and ends this frame's substepping; a hard
+        //   hit (a genuinely fast ball) skips the bounce and
+        //   keeps substepping, clearing a couple of bricks in one pass.
+        //   The streak lives on the ball (not reset every frame) so the
+        //   cap holds across a whole plow-through, not just one frame.
+        if (!bounced) {
+          for (const b of bricks) {
+            if (b.hit) continue;
+            if (rectsOverlap(ball.x, ball.y, BALL_SIZE, BALL_SIZE, b.x, b.y, b.w, b.h)) {
+              const ballCX = ball.x + BALL_SIZE/2;
+              const ballCY = ball.y + BALL_SIZE/2;
+              const overlapX = (b.w/2 + BALL_SIZE/2) - Math.abs(ballCX - (b.x + b.w/2));
+              const overlapY = (b.h/2 + BALL_SIZE/2) - Math.abs(ballCY - (b.y + b.h/2));
+
+              if (b.type === 'indestructible') {
+                if (overlapX < overlapY) {
+                  ball.vx *= -1; stepVX *= -1;
+                  ball.x = ballCX < b.x + b.w/2 ? b.x - BALL_SIZE : b.x + b.w;
+                } else {
+                  ball.vy *= -1; stepVY *= -1;
+                  ball.y = ballCY < b.y + b.h/2 ? b.y - BALL_SIZE : b.y + b.h;
+                }
+                bounced = true;
+                ball.breakStreak = 0;
+                playThud();
+                break;
+              }
+
+              if (b.type === 'color' && ball.powerColor && ball.powerColor === b.color) {
+                colorChainDestroy(b);
+                ball.powerColor = null;
+                break;
+              }
+
+              if (b.type === 'hard') {
+                b.hp--;
+                if (b.hp > 0) {
+                  if (overlapX < overlapY) {
+                    ball.vx *= -1; stepVX *= -1;
+                    ball.x = ballCX < b.x + b.w/2 ? b.x - BALL_SIZE : b.x + b.w;
+                  } else {
+                    ball.vy *= -1; stepVY *= -1;
+                    ball.y = ballCY < b.y + b.h/2 ? b.y - BALL_SIZE : b.y + b.h;
+                  }
+                  bounced = true;
+                  ball.breakStreak = 0;
+                  playCrack();
+                  b.color = HARD_CRACK_COLOR;
+                  spawnBurst(b.x, b.y, b.w, b.h, HARD_CRACK_COLOR);
+                  break;
+                }
+              }
+
+              const hardBall = isBallHard(ball) && ball.breakStreak < BALL_BREAKTHROUGH_MAX;
+              const hitFromSide = overlapX < overlapY;
+              if (!hardBall) {
+                if (hitFromSide) {
+                  ball.vx *= -1; stepVX *= -1;
+                  ball.x = ballCX < b.x + b.w/2 ? b.x - BALL_SIZE : b.x + b.w;
+                } else {
+                  ball.vy *= -1; stepVY *= -1;
+                  ball.y = ballCY < b.y + b.h/2 ? b.y - BALL_SIZE : b.y + b.h;
+                }
+                bounced = true; // a normal hit still ends this frame's substepping
+                ball.breakStreak = 0;
+              } else {
+                ball.breakStreak++;
+              }
+              registerBrickHit(b, hitFromSide);
+              break;
+            }
+          }
+        }
+      }
+
+      if (isBallHard(ball)) spawnBallTrail(ball);
+
+      if (colorOrb && rectsOverlap(ball.x, ball.y, BALL_SIZE, BALL_SIZE, colorOrb.x, colorOrb.y, colorOrb.w, colorOrb.h)) {
+        ball.powerColor = colorOrb.color;
+        spawnBurst(colorOrb.x, colorOrb.y, colorOrb.w, colorOrb.h, colorOrb.color);
+        playPowerUp();
+        destroyRandomColorBricks(colorOrb.color, ORB_BONUS_FRACTION);
+        colorOrb = null;
+      }
+    }
+
+    if (newlyAwakened.length) balls.push(...newlyAwakened);
+
+    updateParticles(performance.now());
+    updateBallTrail(performance.now());
+    updateFallingBricks();
+    updatePendingExplosions(performance.now());
+
+    // a ball is only truly lost once it's fallen off the bottom - extra
+    // balls from waking the dormant trio don't cost a life on their own,
+    // only running out of every ball does
+    balls = balls.filter(b => b.y <= H + BALL_SIZE);
+    if (balls.length === 0) {
+      lives--;
+      running = false;
+      if (lives <= 0) {
+        triggerGameOver();
+      } else {
+        resetBall();
+      }
+    }
+
+    // wall cleared
+    if (!gameOver && !ballsRemainingOnWall()) {
+      nextLevel();
+    }
+  }
+
+  function triggerGameOver(){
+    gameOver = true;
+    running = false;
+  }
+
+  // HUD: lives shown as small paddle-bar icons top-left, score in the
+  // Asteroids vector font top-right. Drawn straight onto the canvas so
+  // it always matches the game's own scale and never needs DOM updates.
+  const HUD_MARGIN_X = 16;
+  const HUD_Y = 44;
+  const LIFE_ICON_W = 18, LIFE_ICON_H = 7, LIFE_ICON_GAP = 6;
+
+  function drawCenterMessage(){
+    if (gameOver) {
+      hudCtx.fillStyle = 'rgba(0,0,0,0.6)';
+      hudCtx.fillRect(0, 0, W, H);
+      drawVectorText(hudCtx, 'GAME OVER', W/2, H/2 - 40, 2.0, { color: '#f5f5f5', align: 'center', glow: 2, lineWidth: 2 });
+      drawVectorText(hudCtx, 'SCORE ' + score, W/2, H/2 + 45, 1.1, { color: '#f5f5f5', align: 'center', glow: 1, lineWidth: 2 });
+      drawVectorText(hudCtx, 'CLICK OR SPACE TO RESTART', W/2, H/2 + 85, 0.85, { color: '#f5f5f5', align: 'center', glow: 1, lineWidth: 2 });
+    } else if (!running && !hasServedOnce) {
+      hudCtx.fillStyle = 'rgba(0,0,0,0.6)';
+      hudCtx.fillRect(0, 0, W, H);
+      drawVectorText(hudCtx, 'BREAKOUT', W/2, H/2 - 10, 2.2, { color: '#f5f5f5', align: 'center', glow: 2, lineWidth: 2 });
+      drawVectorText(hudCtx, 'CLICK OR SPACE TO LAUNCH', W/2, H/2 + 40, 0.9, { color: '#f5f5f5', align: 'center', glow: 1, lineWidth: 2 });
+    } else if (!running && hasServedOnce && !gameOver) {
+      hudCtx.fillStyle = 'rgba(0,0,0,0.6)';
+      hudCtx.fillRect(0, 0, W, H);
+      if (performance.now() < levelMessageUntil) {
+        drawVectorText(hudCtx, 'AREA COMPLETE', W/2, H/2, 1.4, { color: '#f5f5f5', align: 'center', glow: 2, lineWidth: 2 });
+      } else {
+        drawVectorText(hudCtx, 'LEVEL ' + level, W/2, H/2 - 10, 1.4, { color: '#f5f5f5', align: 'center', glow: 2, lineWidth: 2 });
+        drawVectorText(hudCtx, 'CLICK OR SPACE TO LAUNCH', W/2, H/2 + 30, 0.85, { color: '#f5f5f5', align: 'center', glow: 1, lineWidth: 2 });
+      }
+    }
+  }
+
+  function drawHUD(){
+    // lives, top-left
+    for (let i = 0; i < STARTING_LIVES; i++) {
+      const lx = HUD_MARGIN_X + i * (LIFE_ICON_W + LIFE_ICON_GAP);
+      const ly = HUD_Y - LIFE_ICON_H;
+      if (i < lives) {
+        hudCtx.fillStyle = '#f5f5f5';
+        hudCtx.fillRect(lx, ly, LIFE_ICON_W, LIFE_ICON_H);
+      } else {
+        hudCtx.strokeStyle = 'rgba(245,245,245,0.3)';
+        hudCtx.lineWidth = 1;
+        hudCtx.strokeRect(lx + 0.5, ly + 0.5, LIFE_ICON_W - 1, LIFE_ICON_H - 1);
+      }
+    }
+
+    // score, top-right, Asteroids vector font
+    drawVectorText(hudCtx, String(score), W - HUD_MARGIN_X, HUD_Y, 1.3, {
+      color: '#f5f5f5', align: 'right', glow: 1, lineWidth: 2
+    });
+
+    // combo multiplier, centered, only while the combo window is still open
+    if (comboMultiplier >= 2 && performance.now() <= comboWindowEnd) {
+      drawVectorText(hudCtx, comboMultiplier + 'X', W/2, HUD_Y, 1.3, {
+        color: '#f5f5f5', align: 'center', glow: 2, lineWidth: 2
+      });
+    }
+  }
+
+  // Faint oscilloscope-style graticule, drawn behind everything else.
+  const SCOPE_GRID_SPACING = 80;
+  const SCOPE_GRID_COLOR = 'rgba(57,255,136,0.03)';
+  const SCOPE_GRID_CENTER_COLOR = 'rgba(57,255,136,0.06)';
+
+  // Subtle parallax: the grid drifts a little opposite the ball's
+  // position, smoothed so it eases rather than snapping frame to frame.
+  const SCOPE_PARALLAX_MAX = 24; // max pixel shift at either extreme
+  const SCOPE_PARALLAX_EASE = 0.05;
+  let scopeGridOffsetX = 0;
+  let scopeGridOffsetY = 0;
+
+  function drawScopeGrid(){
+    const targetOffsetX = ((playerX + PADDLE_W/2 - W/2) / (W/2)) * SCOPE_PARALLAX_MAX;
+    const parallaxBallY = balls[0] ? balls[0].y : PLAYER_REST_Y;
+    const targetOffsetY = ((parallaxBallY - H/2) / (H/2)) * SCOPE_PARALLAX_MAX;
+    scopeGridOffsetX += (targetOffsetX - scopeGridOffsetX) * SCOPE_PARALLAX_EASE;
+    scopeGridOffsetY += (targetOffsetY - scopeGridOffsetY) * SCOPE_PARALLAX_EASE;
+
+    ctx.save();
+    ctx.translate(scopeGridOffsetX, scopeGridOffsetY);
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = SCOPE_GRID_COLOR;
+    ctx.beginPath();
+    for (let x = SCOPE_GRID_SPACING; x < W; x += SCOPE_GRID_SPACING) {
+      ctx.moveTo(x + 0.5, 0);
+      ctx.lineTo(x + 0.5, H);
+    }
+    for (let y = SCOPE_GRID_SPACING; y < H; y += SCOPE_GRID_SPACING) {
+      ctx.moveTo(0, y + 0.5);
+      ctx.lineTo(W, y + 0.5);
+    }
+    ctx.stroke();
+
+    // slightly brighter crosshair through the center, like a scope's reticle
+    ctx.strokeStyle = SCOPE_GRID_CENTER_COLOR;
+    ctx.beginPath();
+    ctx.moveTo(W/2 + 0.5, 0);
+    ctx.lineTo(W/2 + 0.5, H);
+    ctx.moveTo(0, H/2 + 0.5);
+    ctx.lineTo(W, H/2 + 0.5);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawBricks(now){
+    for (const b of bricks) {
+      if (b.hit || b.pendingExplode) continue;
+      if (b.type === 'indestructible') {
+        ctx.fillStyle = INDESTRUCTIBLE_COLOR;
+        ctx.fillRect(b.x, b.y, b.w, b.h);
+      } else if (b.type === 'hard') {
+        ctx.fillStyle = b.hp < b.maxHp ? HARD_CRACK_COLOR : HARD_COLOR;
+        ctx.fillRect(b.x, b.y, b.w, b.h);
+      } else {
+        ctx.fillStyle = b.color;
+        ctx.fillRect(b.x, b.y, b.w, b.h);
+      }
+      if (b.special) {
+        const mw = b.w * 0.38, mh = b.h * 0.5;
+        ctx.globalAlpha = 0.4;
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(b.x + b.w/2 - mw/2, b.y + b.h/2 - mh/2, mw, mh);
+        ctx.globalAlpha = 1;
+      }
+    }
+    // pending-explosion bricks, drawn last (on top) so the scale-up
+    // reads clearly over neighboring bricks instead of getting clipped
+    // underneath whichever one happens to draw after it
+    for (const b of bricks) {
+      if (b.hit || !b.pendingExplode) continue;
+      const t = Math.min(1, (now - b.pendingStart) / PENDING_EXPLODE_MS);
+      const scale = 1 + (PENDING_EXPLODE_MAX_SCALE - 1) * t;
+      const w = b.w * scale, h = b.h * scale;
+      const x = b.x - (w - b.w) / 2;
+      const y = b.y - (h - b.h) / 2;
+      ctx.fillStyle = lerpColorToWhite(b.color, t);
+      ctx.fillRect(x, y, w, h);
+    }
+  }
+
+  function draw(){
+    const now = performance.now();
+    updateBgProgress();
+    ctx.fillStyle = bgColorAt(bgProgress);
+    ctx.fillRect(0,0,W,H);
+    vignetteEl.style.opacity = String(clamp(1 - bgProgress, 0, 1));
+    drawScopeGrid();
+
+    drawBricks(now);
+    drawParticles(now);
+    drawFallingBricks();
+    drawPulse(now);
+    drawCatchMeter();
+    if (colorOrb) {
+      ctx.fillStyle = colorOrb.color;
+      ctx.fillRect(colorOrb.x, colorOrb.y, colorOrb.w, colorOrb.h);
+    }
+
+    // dormant balls: plain and static (no pulse), a dim version of the
+    // ball's own default color so they read as inactive
+    ctx.globalAlpha = 0.55;
+    ctx.fillStyle = BALL_DEFAULT_COLOR;
+    for (const db of dormantBalls) {
+      ctx.fillRect(db.x, db.y, db.w, db.h);
+    }
+    ctx.globalAlpha = 1;
+
+    ctx.fillStyle = '#f5f5f5';
+
+    const playerVX = playerX - prevPlayerX;
+    const playerVY = playerY - prevPlayerY;
+
+    smoothedPlayerVX = smoothedPlayerVX * GHOST_VELOCITY_SMOOTHING + playerVX * (1 - GHOST_VELOCITY_SMOOTHING);
+    smoothedPlayerVY = smoothedPlayerVY * GHOST_VELOCITY_SMOOTHING + playerVY * (1 - GHOST_VELOCITY_SMOOTHING);
+
+    drawGhosts(playerX, playerY, PADDLE_W, PADDLE_H, smoothedPlayerVX, smoothedPlayerVY);
+    ctx.fillRect(playerX, playerY, PADDLE_W, PADDLE_H);
+
+    drawBallTrail(now);
+    for (const ball of balls) {
+      ball.smoothedVX = ball.smoothedVX * GHOST_VELOCITY_SMOOTHING + ball.vx * (1 - GHOST_VELOCITY_SMOOTHING);
+      ball.smoothedVY = ball.smoothedVY * GHOST_VELOCITY_SMOOTHING + ball.vy * (1 - GHOST_VELOCITY_SMOOTHING);
+      ctx.fillStyle = ball.powerColor || BALL_DEFAULT_COLOR;
+      drawGhosts(ball.x, ball.y, BALL_SIZE, BALL_SIZE, ball.smoothedVX, ball.smoothedVY);
+      ctx.fillRect(ball.x, ball.y, BALL_SIZE, BALL_SIZE);
+    }
+
+    if (fadingBalls.length) {
+      fadingBalls = fadingBalls.filter(fb => now - fb.startTime < BALL_FADE_OUT_MS);
+      for (const fb of fadingBalls) {
+        const alpha = 1 - (now - fb.startTime) / BALL_FADE_OUT_MS;
+        ctx.globalAlpha = alpha;
+        ctx.fillStyle = fb.color;
+        ctx.fillRect(fb.x, fb.y, BALL_SIZE, BALL_SIZE);
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    hudCtx.clearRect(0, 0, W, H);
+    drawHUD();
+    // drawPoem(now); // REM: poetry disabled for now
+    drawCenterMessage();
+
+    prevPlayerX = playerX;
+    prevPlayerY = playerY;
+  }
+
+  function loop(){
+    // updatePoem(performance.now()); // REM: poetry disabled for now
+    update();
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  loop();
+})();
+</script>
+<script>
+(function(){
+  const introScreen = document.getElementById('introScreen');
+  if (!introScreen) return;
+
+  (function renderIntroHint(){
+    const canvas = document.getElementById('introHintCanvas');
+    if (!canvas || typeof drawVectorText !== 'function') return;
+    const dpr = window.devicePixelRatio || 1;
+    const text = 'TAP OR PRESS ANY KEY';
+    const size = 0.75;
+    const charWidth = 12 * size;
+    const textWidth = text.length * charWidth;
+    const textHeight = 12 * size;
+    const padX = 6, padY = 6;
+    const cssWidth = Math.ceil(textWidth + padX * 2);
+    const cssHeight = Math.ceil(textHeight + padY * 2);
+    canvas.style.width = cssWidth + 'px';
+    canvas.style.height = cssHeight + 'px';
+    canvas.width = cssWidth * dpr;
+    canvas.height = cssHeight * dpr;
+    const ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+    drawVectorText(ctx, text, cssWidth / 2, cssHeight - padY, size, {
+      color: '#f5f5f5', align: 'center', lineWidth: 1.3, glow: 0
+    });
+  })();
+
+  let dismissed = false;
+  function dismissIntro(){
+    if (dismissed) return;
+    dismissed = true;
+    introScreen.style.opacity = '0';
+    introScreen.style.pointerEvents = 'none';
+    setTimeout(() => { introScreen.style.display = 'none'; }, 500);
+  }
+  introScreen.addEventListener('click', dismissIntro);
+  introScreen.addEventListener('touchstart', dismissIntro, { passive: true });
+  window.addEventListener('keydown', dismissIntro, { once: true });
+  setTimeout(dismissIntro, 2600);
+})();
+</script>
+</body>
+</html>

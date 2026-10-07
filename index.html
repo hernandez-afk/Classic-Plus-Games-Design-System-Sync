@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Classics+ Test Arcade</title>
+<style>
+/* Layout: a cabinet row. Game picker across the top, the live cabinet left, the play-test sheet right; stacks on phones.
+   Single dark look on purpose: the Classic Plus system is light on near-black. Values are the kit's tokens. */
+:root {
+  color-scheme: dark;
+  --void: #000000;
+  --field-night: #14120c;
+  --ink: #f5f5f5;
+  --ink-muted: rgba(255, 255, 255, 0.6);
+  --signal: rgb(150, 235, 255);
+  --coin: rgb(255, 225, 60);
+  --frame: #4a4a4a;
+  --card: rgba(255, 255, 255, 0.05);
+  --card-edge: rgba(255, 255, 255, 0.6);
+  --card-edge-off: rgba(255, 255, 255, 0.25);
+  --grid-intro: rgba(245, 245, 245, 0.05);
+  --halo: 0 0 24px rgba(57, 255, 136, 0.08);
+  --mono: "Courier New", Courier, monospace;
+}
+html, body { height: 100%; }
+body {
+  background-color: var(--void);
+  background-image: linear-gradient(var(--grid-intro) 1px, transparent 1px), linear-gradient(90deg, var(--grid-intro) 1px, transparent 1px);
+  background-size: 36px 36px;
+  color: var(--ink); font-family: var(--mono); font-size: 15px; line-height: 1.5;
+  padding-inline: 16px; padding-block: 16px 24px; box-sizing: border-box;
+}
+* { box-sizing: border-box; }
+.wrap { max-width: 1280px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+
+header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+header img { width: 44px; height: auto; display: block; }
+h1 { margin: 0; font-size: 20px; letter-spacing: 3px; text-transform: uppercase; font-weight: 700; }
+.sub { margin: 0; color: var(--ink-muted); font-size: 13px; letter-spacing: 1px; }
+
+nav { display: flex; gap: 8px; flex-wrap: wrap; }
+nav button {
+  font: inherit; font-size: 14px; letter-spacing: 2px; text-transform: uppercase;
+  min-height: 44px; padding: 0 16px; border-radius: 0; cursor: pointer;
+  background: transparent; color: var(--ink); border: 2px solid var(--card-edge-off);
+  display: inline-flex; align-items: center; gap: 10px;
+}
+nav button:hover { border-color: var(--card-edge); }
+nav button[aria-selected="true"] { border-color: var(--signal); color: var(--signal); background: var(--card); }
+nav button:focus-visible, .stage-tools button:focus-visible, .sheet input:focus-visible + span, a:focus-visible { outline: 2px solid var(--coin); outline-offset: 2px; }
+.count { font-size: 12px; color: var(--ink-muted); font-variant-numeric: tabular-nums; }
+nav button[aria-selected="true"] .count { color: var(--signal); }
+
+main { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 16px; align-items: start; }
+@media (max-width: 900px) { main { grid-template-columns: minmax(0, 1fr); } }
+
+.stage { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.screen {
+  position: relative; width: 100%; background: var(--void);
+  border: 2px solid var(--frame); box-shadow: var(--halo);
+  height: min(78vh, 760px); min-height: 420px;
+}
+.screen.portrait { max-width: 520px; margin: 0 auto; aspect-ratio: 420 / 680; height: auto; max-height: 80vh; min-height: 0; }
+.screen iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; display: block; background: var(--void); }
+.stage-tools { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; justify-content: space-between; color: var(--ink-muted); font-size: 13px; }
+.stage-tools .keys { letter-spacing: 1px; }
+.stage-tools button, .stage-tools a {
+  font: inherit; font-size: 13px; letter-spacing: 1px; text-transform: uppercase; min-height: 44px; padding: 0 14px;
+  background: transparent; color: var(--ink); border: 2px solid var(--card-edge-off); border-radius: 0; cursor: pointer;
+  display: inline-flex; align-items: center; text-decoration: none;
+}
+.stage-tools button:hover, .stage-tools a:hover { border-color: var(--card-edge); }
+.tools-r { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.sheet { background: var(--card); border: 2px solid var(--card-edge-off); padding: 16px; display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.sheet h2 { margin: 0; font-size: 14px; letter-spacing: 2px; text-transform: uppercase; display: flex; justify-content: space-between; gap: 8px; }
+.sheet h2 .tally { color: var(--coin); font-variant-numeric: tabular-nums; }
+.sheet p { margin: 0; color: var(--ink-muted); font-size: 13px; }
+.sheet ol { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.sheet label { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 10px; align-items: start; min-height: 44px; padding: 8px 0; cursor: pointer; font-size: 14px; }
+.sheet input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.box { width: 22px; height: 22px; border: 2px solid var(--card-edge); display: grid; place-items: center; font-size: 15px; line-height: 1; color: var(--void); margin-top: 1px; }
+.sheet input:checked + .box { background: var(--signal); border-color: var(--signal); }
+.sheet input:checked + .box::after { content: "\2713"; font-weight: 700; }
+.sheet input:checked ~ .txt b { color: var(--signal); }
+.txt b { display: block; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; font-size: 13px; }
+.txt span { color: var(--ink-muted); font-size: 13px; }
+.notes { border-top: 2px solid var(--card-edge-off); padding-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+.notes ul { margin: 0; padding-left: 18px; font-size: 13px; color: var(--ink-muted); display: flex; flex-direction: column; gap: 4px; }
+.notes li b { color: var(--ink); font-weight: 400; }
+.reset { align-self: flex-start; font: inherit; font-size: 12px; letter-spacing: 1px; text-transform: uppercase; min-height: 44px; padding: 0 12px; background: transparent; color: var(--ink-muted); border: 2px solid var(--card-edge-off); border-radius: 0; cursor: pointer; }
+.reset:hover { color: var(--ink); border-color: var(--card-edge); }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header>
+    <img src="kit/logo.svg" alt="Classics+ logo">
+    <div>
+      <h1>Classics+ Test Arcade</h1>
+      <p class="sub">Five cabinets on the Classic Plus shell. Pick one, play it, tick the checks.</p>
+    </div>
+  </header>
+
+  <nav role="tablist" aria-label="Games" id="tabs"></nav>
+
+  <main>
+    <section class="stage" aria-label="Game">
+      <div class="screen" id="screen"><iframe id="frame" title="Game" allow="autoplay; fullscreen"></iframe></div>
+      <div class="stage-tools">
+        <span class="keys">Click the game first. P pause &middot; S settings &middot; M sound &middot; H how to play</span>
+        <div class="tools-r">
+          <button type="button" id="reload">Reload</button>
+          <button type="button" id="full">Full screen</button>
+        </div>
+      </div>
+    </section>
+
+    <aside class="sheet" aria-labelledby="sheet-h">
+      <h2 id="sheet-h"><span>Play-test sheet</span><span class="tally" id="tally">0/0</span></h2>
+      <p>From the design system's ship list: play each game once in every mode below. Ticks are saved in this browser only.</p>
+      <ol id="checks"></ol>
+      <button type="button" class="reset" id="reset">Clear ticks for this game</button>
+      <div class="notes">
+        <h2><span>What changed</span></h2>
+        <ul id="notes"></ul>
+      </div>
+    </aside>
+  </main>
+  <div class="sr" aria-live="polite" id="live"></div>
+</div>
+
+<script>
+(function(){
+var GAMES = [
+  { id: 'asteroids', name: 'Asteroids', file: 'games/asteroids.html', shape: 'wide', notes: [] },
+  { id: 'breakout', name: 'Breakout', file: 'games/breakout.html', shape: 'portrait', notes: [] },
+  { id: 'pong', name: 'Pong', file: 'games/pong.html', shape: 'portrait', notes: [] },
+  { id: 'celestipede', name: 'Celestipede', file: 'games/celestipede.html', shape: 'wide', notes: [] },
+  { id: 'moonminer', name: 'Moon Miner', file: 'games/moonminer.html', shape: 'wide', notes: [] }
+];
+GAMES[1].notes = [
+  '<b>Point notches.</b> Bricks show their value as notches: 1 yellow, 2 green, 3 orange, 4 red. Hard bricks get a frame, steel gets hatching. This closes the ladder&rsquo;s colour-only gap.',
+  '<b>Shell frame.</b> Boot card, title, how to play, pause, settings and results come from the shared shell. Steering and tap-on/off work for the paddle.',
+  '<b>Game time.</b> Physics stepped at 60Hz on shell time: pause freezes everything and GAME SPEED slows it.',
+  '<b>Poem narrator</b> back on, one line at a time, read to screen readers. Lost balls and AREA COMPLETE are announced too.',
+  '<b>Known gap.</b> Filled catch-meter slots use the kit&rsquo;s decorative faint ink (under 3:1); filled and empty slots also differ by shape.'
+];
+GAMES[2].notes = [
+  '<b>Shell frame.</b> The game&rsquo;s own title, serve prompt, game-over screen and initials table are gone; the shell handles them and saves your best score.',
+  '<b>Contrast.</b> Checked on every step of the colour-cycling ground. The purple peg read 2.6:1 and is now the kit&rsquo;s hard-brick colour.',
+  '<b>Smash beam</b> is stepped bars, not a gradient, and can fire at most about 3 times a second.',
+  '<b>Game time.</b> No more setTimeout: serves, combos and effects freeze on pause and slow with GAME SPEED.',
+  '<b>Screen readers</b> hear points, lives lost and combos.',
+  '<b>Known gap.</b> Drag puts the paddle where your finger is, so STEERING only changes keyboard speed.'
+];
+GAMES[0].notes = [
+  '<b>Shell frame.</b> Boot card, title, how to play, pause, settings and GAME OVER come from the shared shell. Hyperspace moved from Shift to Down, one press.',
+  '<b>Colour means allegiance.</b> Saucer is hostile red, drones and shield are signal blue, pickups and currency are coin yellow, dust is its own token (it used to clash with the shield). Checked against all 360 sky hues.',
+  '<b>Readable shop.</b> Card text raised to the 0.75 floor and wrapped; locked cards brightened to 4.9:1; FIRE button labelled and brighter.',
+  '<b>Flashes and motion.</b> Blinks slowed to 167ms; reduced motion drops the warp streaks and steadies the shield and markers.',
+  '<b>Screen readers</b> hear waves, lost ships, power-ups, docking and purchases.',
+  '<b>Known gap.</b> PAUSED is written straight onto space, as the system specifies, so it can overlap rocks.'
+];
+GAMES[3].notes = [
+  '<b>No mashing.</b> FIRE autofires while down; with HELD KEYS on TAP ON/OFF one press keeps firing. On touch it fires on its own and you only drag.',
+  '<b>Never colour alone.</b> Pickups carry a letter (M R S W B C), buff bars are lettered, two-hit comets show a second diamond, weak queen segments crack.',
+  '<b>Flashes.</b> Explosions no longer cycle colours at 24 a second and the beam no longer flickers. Reduced motion cuts shake and star drift.',
+  '<b>Shell frame.</b> Its own title, pause, game-over, initials table, sound button and test buttons are gone; your old best score carries over.',
+  '<b>Messages STAY</b> holds the wave banner until you press Space or tap.',
+  '<b>Known gap.</b> The blue saucer is an enemy drawn in the player&rsquo;s signal blue, kept for the game&rsquo;s look; its shape sets it apart.'
+];
+GAMES[4].notes = [
+  '<b>Crashes end the run.</b> A crash or failed mission now goes to the shell&rsquo;s result screen; PLAY AGAIN retries the mission. Your campaign (map, credits, upgrades) is kept. N twice on the star map starts a new one.',
+  '<b>Timer off</b> makes the drill clock stop for practice. <b>Messages STAY</b> holds the end-of-moon tally.',
+  '<b>Never colour alone.</b> Gems carry marks by value, dug pads go grey and dashed, brittle decks are cracked, fuel says LOW.',
+  '<b>Flashes.</b> Full-screen flashes are under 9% and at most 3 a second, and off under reduced motion, which also cuts shake and the post-casino double vision.',
+  '<b>Controls.</b> S now opens settings, so WASD&rsquo;s S is gone; use Down. L leaves the shop or casino.',
+  '<b>Known gaps.</b> Alert and hostile red can share a screen on moons with saucers or lava. The phosphor bloom is kept, and contrast was measured without it.'
+];
+var CHECKS = [
+  ['First play', 'HOW TO PLAY comes first and lists every control.'],
+  ['Muted', 'Press M. Every event still shows on screen.'],
+  ['Keyboard only', 'Start, play, pause and restart without the mouse.'],
+  ['On a phone', 'Drag to steer; every button is easy to hit.'],
+  ['50% speed, timer off', 'SETTINGS: GAME SPEED 50%, TIMER OFF where offered.'],
+  ['Held keys tap on/off', 'SETTINGS: HELD KEYS TAP ON/OFF. Nothing needs holding or mashing.'],
+  ['Your own keys', 'SETTINGS > KEYS: rebind a control, then play with it.'],
+  ['Motion reduced', 'SETTINGS: MOTION REDUCED. No shake, no flashes, no blinking prompts.'],
+  ['Colour blindness', 'DevTools > Rendering > Emulate vision deficiencies. Nothing told by colour alone.'],
+  ['Pause on leave', 'Switch tab or window. The game is PAUSED when you return.']
+];
+function load(k, d){ try { var v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } }
+function save(k, v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+var ticks = load('cpta:ticks', {});
+var current = null;
+var tabs = document.getElementById('tabs'), frame = document.getElementById('frame'), screen = document.getElementById('screen');
+var live = document.getElementById('live');
+
+function done(id){ var t = ticks[id] || {}; var n = 0; for (var k in t) if (t[k]) n++; return n; }
+function renderTabs(){
+  tabs.innerHTML = '';
+  GAMES.forEach(function(g){
+    var b = document.createElement('button');
+    b.type = 'button'; b.setAttribute('role', 'tab'); b.id = 'tab-' + g.id;
+    b.setAttribute('aria-selected', current && current.id === g.id ? 'true' : 'false');
+    b.innerHTML = '<span>' + g.name + '</span><span class="count">' + done(g.id) + '/' + CHECKS.length + '</span>';
+    b.addEventListener('click', function(){ select(g.id, true); });
+    tabs.appendChild(b);
+  });
+}
+function renderSheet(){
+  var ol = document.getElementById('checks'); ol.innerHTML = '';
+  var t = ticks[current.id] || {};
+  CHECKS.forEach(function(c, i){
+    var li = document.createElement('li');
+    li.innerHTML = '<label><input type="checkbox" id="chk-' + i + '"' + (t[i] ? ' checked' : '') + '><span class="box" aria-hidden="true"></span><span class="txt"><b>' + c[0] + '</b><span>' + c[1] + '</span></span></label>';
+    li.querySelector('input').addEventListener('change', function(e){
+      ticks[current.id] = ticks[current.id] || {}; ticks[current.id][i] = e.target.checked; save('cpta:ticks', ticks);
+      renderTabs(); tally();
+    });
+    ol.appendChild(li);
+  });
+  var ul = document.getElementById('notes'); ul.innerHTML = '';
+  current.notes.forEach(function(n){ var li = document.createElement('li'); li.innerHTML = n; ul.appendChild(li); });
+  tally();
+}
+function tally(){ document.getElementById('tally').textContent = done(current.id) + '/' + CHECKS.length; }
+function select(id, focusGame){
+  current = GAMES.filter(function(g){ return g.id === id; })[0] || GAMES[0];
+  save('cpta:game', current.id);
+  screen.className = 'screen' + (current.shape === 'portrait' ? ' portrait' : '');
+  frame.title = current.name;
+  frame.src = current.file;
+  renderTabs(); renderSheet();
+  live.textContent = current.name + ' loaded.';
+  if (focusGame) frame.addEventListener('load', function f(){ frame.removeEventListener('load', f); try { frame.contentWindow.focus(); } catch (e) {} });
+}
+document.getElementById('reload').addEventListener('click', function(){ frame.src = current.file; });
+document.getElementById('full').addEventListener('click', function(){
+  var el = screen; var p = el.requestFullscreen ? el.requestFullscreen() : null;
+  if (p && p.catch) p.catch(function(){});
+});
+document.getElementById('reset').addEventListener('click', function(){ ticks[current.id] = {}; save('cpta:ticks', ticks); renderTabs(); renderSheet(); });
+tabs.addEventListener('keydown', function(e){
+  if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+  var i = GAMES.indexOf(current) + (e.key === 'ArrowRight' ? 1 : -1);
+  i = (i + GAMES.length) % GAMES.length; select(GAMES[i].id); document.getElementById('tab-' + GAMES[i].id).focus();
+});
+var hash = (location.hash || '').slice(1);
+select(GAMES.some(function(g){ return g.id === hash; }) ? hash : load('cpta:game', 'asteroids'));
+})();
+</script>
+</body>
+</html>

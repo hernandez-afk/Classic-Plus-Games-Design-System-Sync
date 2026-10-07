@@ -1,0 +1,1177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>BREAKOUT</title>
+<link rel="stylesheet" href="../kit/tokens.css">
+<link rel="stylesheet" href="../kit/bundle.css">
+<style>
+  html { height: 100%; background: var(--field-night); }
+  /* Size the cabinet to whichever of width or height runs out first, so the
+     420x640 canvas keeps its aspect inside any window or launcher iframe. */
+  .cp-stage-portrait { width: min(94vw, 420px, calc((100vh - 48px) * 420 / 640)); width: min(94vw, 420px, calc((100dvh - 48px) * 420 / 640)); }
+  .cp-holder, .cp-canvas-portrait { max-height: none; }
+  .cp-canvas-portrait { outline: none; }
+  .cp-layer { width: 100%; height: 100%; }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+</style>
+</head>
+<body class="cp-page">
+<div class="cp-stage-portrait">
+  <div class="cp-holder">
+    <canvas id="game" class="cp-canvas-portrait" width="420" height="640" aria-label="Breakout playfield"></canvas>
+    <div id="vignette" class="cp-vignette"></div>
+    <canvas id="hud" class="cp-layer" width="420" height="640" aria-hidden="true"></canvas>
+  </div>
+  <div class="cp-hint">drag to move</div>
+</div>
+<div id="gameLive" class="sr-only" role="status" aria-live="polite"></div>
+<script src="../kit/bundle.js"></script>
+<script>
+(function(){
+  const CP = window.ClassicPlus;
+  const C = CP.COLORS;
+  const canvas = document.getElementById('game');
+  const hudCanvas = document.getElementById('hud');
+  const vignetteEl = document.getElementById('vignette');
+  const liveEl = document.getElementById('gameLive');
+  const W = 420, H = 640;
+
+  // Crisp at devicePixelRatio; CSS (cp-canvas-portrait) handles the on-screen size.
+  function crisp(cv){
+    const dpr = Math.min(3, window.devicePixelRatio || 1);
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    const c = cv.getContext('2d'); c.setTransform(dpr, 0, 0, dpr, 0, 0); return c;
+  }
+  const ctx = crisp(canvas);
+  const hudCtx = crisp(hudCanvas);
+
+  // The game's own events for screen readers (the Shell announces start, pause and the result).
+  function say(text){ liveEl.textContent = ''; setTimeout(() => { liveEl.textContent = text; }, 30); }
+
+  const TOUCH = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+
+  // Game clock: milliseconds of game time, advanced only by shell.tick, so
+  // pause freezes every timer and GAME SPEED slows all of them together.
+  let T = 0;
+  const STEP = 1 / 60; // physics is tuned per 60Hz step, exactly as the source ran per frame
+
+  const PADDLE_W = 70, PADDLE_H = 20;
+  const BALL_SIZE = 14;
+  const PLAYER_REST_Y = H - 60 - PADDLE_H;
+  const STARTING_LIVES = 3;
+  const BALL_BREAKTHROUGH_SPEED = 13; // a ball moving at least this fast punches through bricks instead of bouncing
+  const BALL_BREAKTHROUGH_MAX = 2; // punches through at most this many bricks before the next one forces a bounce
+  const AREA_COMPLETE_PAUSE_MS = 1300; // "AREA COMPLETE" shows for this long before the player can launch the next level
+  const KB_SPEED = 7; // px per step for keyboard steering, times STEERING
+
+  let playerX = W/2 - PADDLE_W/2;
+  let playerY = PLAYER_REST_Y;
+  let score = 0;
+  let lives = STARTING_LIVES;
+  let level = 1;
+  let bricksBroken = 0;
+  let comboMultiplier = 0; // 0 = no active combo; increments each brick broken while the previous combo window is still open
+  let comboWindowEnd = 0;
+  let prevPlayerX = playerX;
+  let prevPlayerY = playerY;
+
+  function makeBall(x, y){
+    return { x, y, vx: 0, vy: 0, speed: 5.4, spin: 0, breakStreak: 0, powerColor: null, powerTier: 0, smoothedVX: 0, smoothedVY: 0 };
+  }
+  let balls = [makeBall(W/2, PLAYER_REST_Y - BALL_SIZE - 2)];
+
+  // Dormant balls: three inert balls sitting just above the top row,
+  // packed tightly together in the center. Any active ball that touches
+  // one wakes it up into a full participant.
+  let dormantBalls = []; // { x, y, w, h }
+  const DORMANT_BALL_COUNT = 3;
+  const DORMANT_BALL_GAP = 2;
+  const WAKE_MIN_VY_FRACTION = 0.55;
+  const WAKE_SPEED_FACTOR = 0.6;
+
+  function spawnDormantBalls(){
+    dormantBalls = [];
+    const totalWidth = DORMANT_BALL_COUNT * BALL_SIZE + (DORMANT_BALL_COUNT - 1) * DORMANT_BALL_GAP;
+    let x = W/2 - totalWidth/2;
+    const y = BRICK_TOP - BALL_SIZE - 6;
+    for (let i = 0; i < DORMANT_BALL_COUNT; i++) {
+      dormantBalls.push({ x, y, w: BALL_SIZE, h: BALL_SIZE });
+      x += BALL_SIZE + DORMANT_BALL_GAP;
+    }
+  }
+
+  // Audio: the kit's Breakout set (same voices, same key). The Shell drives
+  // mute and VOLUME through the synth.
+  const syn = CP.createSynth();
+  const PING_SCALE = CP.PING_SCALE;
+  function playThud(){ syn.sfx.thud(); }
+  function playCrack(){ syn.sfx.crack(); }
+  function playPing(freq){ syn.sfx.ping(freq); }
+  function playCatch(){ syn.sfx.catch(); }
+  function playPowerUp(){ syn.sfx.powerUp(); }
+  function playPaddleTap(intensity){ syn.sfx.tap(intensity); }
+  // The column pulse's rising sweep has no kit voice; it respects mute and VOLUME itself.
+  function playPulse(){
+    const ac = syn.context();
+    if (!ac || syn.muted) return;
+    const now = ac.currentTime;
+    const dur = PULSE_DURATION_MS / 1000 / shell.speed();
+    const osc = ac.createOscillator();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(80, now);
+    osc.frequency.exponentialRampToValueAtTime(600, now + dur);
+    const gain = ac.createGain();
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.linearRampToValueAtTime(0.12 * 0.6 * syn.volume, now + 0.05);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+    osc.connect(gain); gain.connect(ac.destination);
+    osc.start(now); osc.stop(now + dur + 0.02);
+  }
+
+  // Brick wall layout (BrickWall): 8 columns, flat hard-edged rects.
+  const BRICK_COLS = CP.WALL.cols;
+  const BRICK_H = CP.WALL.brickH;
+  const BRICK_GAP = CP.WALL.gap;
+  const BRICK_ROW_GAP = CP.WALL.rowGap;
+  const BRICK_TOP = CP.WALL.top;
+  const BRICK_SIDE_MARGIN = CP.WALL.side;
+  const BRICK_W = (W - 2 * BRICK_SIDE_MARGIN - (BRICK_COLS - 1) * BRICK_GAP) / BRICK_COLS;
+
+  // Sunrise sky (ProgressSky): warms from night to a deep morning blue as the wall comes down.
+  const sky = CP.createSunriseSky();
+  let breakableBrickCount = 1;
+  function wallProgress(){ return bricks.filter(b => b.hit).length / breakableBrickCount; }
+
+  // Poem reveal (the narrator): one line surfaces at a time as the wall
+  // comes down. Each line fades in, holds long enough to read, fades out,
+  // then waits until enough of the wall is gone to earn the next one.
+  const POEMS = [
+    [ // level 1
+      "of course it hurts to leave the shell.",
+      "why else would the seed wait so long?",
+      "why else would the root hold its breath",
+      "before it dares to reach?",
+      "the shell was never a prison-",
+      "it was the shape of not-yet.",
+      "growth is only rupture with a kinder name.",
+      "what breaks you open was built to."
+    ],
+    [ // level 2
+      "now the air finds what the shell forgot to hide.",
+      "this is what unshelled feels like-",
+      "wind where there used to be wall.",
+      "you did not know your own shape until it moved.",
+      "freedom is not the absence of walls.",
+      "it is what walks through the gap they left.",
+      "nothing out here promises safety.",
+      "only room to find out."
+    ]
+  ];
+  const POEM_FADE_IN_MS = 2600;
+  const POEM_HOLD_MS = 2800;
+  const POEM_FADE_OUT_MS = 2600;
+  const POEM_GAP_MS = 900;
+  const POEM_MAX_ALPHA = 0.8;   // ink at 0.8 keeps 4.5:1 on every sunrise stop
+  const POEM_FONT_SIZE = 0.8;   // above the 0.75 floor
+  const POEM_MAX_WIDTH = W - 2 * BRICK_SIDE_MARGIN;
+  const POEM_LINE_HEIGHT = 24;
+  const POEM_Y = H/2 - 30;
+
+  let currentPoemLines = POEMS[0];
+  let poemLineIndex = -1;
+  let poemState = 'idle'; // 'idle' | 'in' | 'hold' | 'out' | 'wait'
+  let poemStateStart = 0;
+  let lastInputT = 0;     // game time of the player's last key or tap (MESSAGES: STAY)
+
+  function updatePoem(now){
+    if (poemState === 'idle') {
+      const nextIndex = poemLineIndex + 1;
+      if (nextIndex < currentPoemLines.length) {
+        if (wallProgress() >= nextIndex / currentPoemLines.length) {
+          poemLineIndex = nextIndex;
+          poemState = 'in';
+          poemStateStart = now;
+          say(currentPoemLines[poemLineIndex]);
+        }
+      }
+      return;
+    }
+    const elapsed = now - poemStateStart;
+    if (poemState === 'in' && elapsed >= POEM_FADE_IN_MS) { poemState = 'hold'; poemStateStart = now; }
+    else if (poemState === 'hold' && elapsed >= POEM_HOLD_MS && !(shell.messagesStay() && lastInputT <= poemStateStart)) { poemState = 'out'; poemStateStart = now; }
+    else if (poemState === 'out' && elapsed >= POEM_FADE_OUT_MS) { poemState = 'wait'; poemStateStart = now; }
+    else if (poemState === 'wait' && elapsed >= POEM_GAP_MS) { poemState = 'idle'; poemStateStart = now; }
+  }
+
+  function poemAlpha(now){
+    if (poemState === 'idle' || poemLineIndex < 0) return 0;
+    const elapsed = now - poemStateStart;
+    if (poemState === 'in') return clamp(elapsed / POEM_FADE_IN_MS, 0, 1) * POEM_MAX_ALPHA;
+    if (poemState === 'hold') return POEM_MAX_ALPHA;
+    if (poemState === 'out') return clamp(1 - elapsed / POEM_FADE_OUT_MS, 0, 1) * POEM_MAX_ALPHA;
+    return 0;
+  }
+
+  function resetPoem(){
+    currentPoemLines = POEMS[Math.min(level - 1, POEMS.length - 1)];
+    poemLineIndex = -1;
+    poemState = 'idle';
+    poemStateStart = 0;
+  }
+
+  function drawPoem(now){
+    const alpha = poemAlpha(now);
+    if (alpha <= 0) return;
+    const rows = CP.wrapVectorText(currentPoemLines[poemLineIndex], POEM_FONT_SIZE, POEM_MAX_WIDTH);
+    const centerOffset = ((rows.length - 1) / 2) * POEM_LINE_HEIGHT;
+    hudCtx.save();
+    hudCtx.globalAlpha = alpha;
+    for (let i = 0; i < rows.length; i++) {
+      const y = POEM_Y - centerOffset + i * POEM_LINE_HEIGHT;
+      CP.drawVectorText(hudCtx, rows[i], W/2, y, POEM_FONT_SIZE, { color: C.ink, align: 'center', glow: 0.6, glowScale: 1, lineWidth: 1.3 });
+    }
+    hudCtx.restore();
+  }
+
+  let bricks = []; // { x, y, w, h, color, points, row, col, hit, special, type, hp?, maxHp? }
+  let colorOrb = null; // { x, y, w, h, color, tier } - dropped by a special brick
+  let fallingBricksCaught = 0;
+  let pulse = null;
+
+  // Levels, painted in the companion editor ('.' empty, R/O/G/Y colour,
+  // H hard, X steel). Cycles as levels advance. Colours and points come
+  // from the kit's brick ladder (BrickWall tokens).
+  const HARD_CRACK_COLOR = C.brickCracked;
+  const LEVELS = [
+`RGRGGRGR
+GRRRRRRG
+GYROORYG
+RYR..RYR
+ORR..RRO
+ORROORRO
+YRORRORY
+YGOGGOGY`,
+`.OOOOOO.
+OOYYYYOO
+OHXHHXHO
+OHXHHXHO
+OHXYYXHO
+OHO..OHO
+ROOYYOOR
+.RRRRRR.`,
+`RRRRRRRR
+GGYGGYGG
+GYHYYHYG
+GYHYYHYG
+OOYOOYOO
+OOYOOYOO
+HH.HH.HH
+........`,
+`GGGGGGGG
+RRRRRRRR
+RXOOOOXR
+RXOXXOXR
+RXOOOOXR
+RRRRRRRR
+GGGGGGGG
+YYYYYYYY`,
+`........
+...RR...
+...OO...
+.X.GG.X.
+...YY...
+........
+...XX...
+........`,
+  ];
+
+  function buildBricks(){
+    bricks = CP.parseWall(LEVELS[(level - 1) % LEVELS.length], W);
+    // One special brick per distinct colour present.
+    const byColor = new Map();
+    for (const b of bricks) {
+      if (b.type !== 'color') continue;
+      if (!byColor.has(b.color)) byColor.set(b.color, []);
+      byColor.get(b.color).push(b);
+    }
+    for (const group of byColor.values()) {
+      group[Math.floor(Math.random() * group.length)].special = true;
+    }
+    breakableBrickCount = Math.max(1, bricks.filter(b => b.type !== 'indestructible').length);
+    spawnDormantBalls();
+    fallingBricksCaught = 0;
+    pulse = null;
+  }
+  buildBricks();
+
+  // ---- Second cue for the points ladder (README rule 2) ----
+  // Colour is never the only sign of a brick's value: each brick carries
+  // dark notches cut into its top edge, one per step of the ladder
+  // (Y 1pt = 1, G 3pt = 2, O 5pt = 3, R 7pt = 4). Hard bricks (5pt) add an
+  // inner frame (cracked ones a crack through it); steel has no notches
+  // and is hatched. A charged ball and its orb carry the same count as dice pips.
+  const MARK = 'rgba(0,0,0,0.62)';
+  function tierOf(points){ return points >= 7 ? 4 : points >= 5 ? 3 : points >= 3 ? 2 : points >= 1 ? 1 : 0; }
+  function drawBrickMarks(c, b, type, hp, maxHp, x, y, w, h){
+    x = x === undefined ? b.x : x; y = y === undefined ? b.y : y; w = w || b.w; h = h || b.h;
+    c.save();
+    c.fillStyle = MARK; c.strokeStyle = MARK;
+    if (type === 'indestructible') {
+      c.beginPath(); c.rect(x, y, w, h); c.clip();
+      c.lineWidth = 2;
+      c.beginPath();
+      for (let k = -h; k < w; k += 9) { c.moveTo(x + k, y + h); c.lineTo(x + k + h, y); }
+      c.stroke();
+      c.restore();
+      return;
+    }
+    const tier = tierOf(b.points);
+    for (let i = 0; i < tier; i++) {
+      const cx = x + w * (i + 1) / (tier + 1);
+      c.fillRect(Math.round(cx - 1.5), y, 3, 5);
+    }
+    if (type === 'hard') {
+      c.lineWidth = 1.5;
+      c.strokeRect(x + 2.75, y + 6.75, w - 5.5, h - 9.5);
+      if (hp < maxHp) {
+        c.lineWidth = 2;
+        c.beginPath();
+        c.moveTo(x + w * 0.30, y + 6); c.lineTo(x + w * 0.42, y + h * 0.62);
+        c.lineTo(x + w * 0.55, y + h * 0.5); c.lineTo(x + w * 0.68, y + h);
+        c.stroke();
+      }
+    }
+    c.restore();
+  }
+  // Dice pips on a 14px square (orb, charged ball).
+  const PIP_LAYOUT = { 1: [[1,1]], 2: [[0,0],[2,2]], 3: [[0,0],[1,1],[2,2]], 4: [[0,0],[2,0],[0,2],[2,2]] };
+  function drawPips(c, x, y, s, tier){
+    const spots = PIP_LAYOUT[tier]; if (!spots) return;
+    const p = 3, step = (s - 2 * 2 - p) / 2;
+    c.save(); c.fillStyle = MARK;
+    for (const [i, j] of spots) c.fillRect(Math.round(x + 2 + i * step), Math.round(y + 2 + j * step), p, p);
+    c.restore();
+  }
+
+  // Particle burst: hard-edged pixel chips (PixelBurst 'crumble' values),
+  // plus this game's own forces: the ball's vortex and the paddle's shove.
+  const PB = CP.BURST_PRESETS.crumble;
+  const PARTICLE_COUNT = PB.count;
+  const PARTICLE_SIZE = PB.size;
+  const PARTICLE_JITTER = PB.jitter;
+  const PARTICLE_LIFETIME_MS = PB.lifetimeMs;
+  const COMBO_WINDOW_MS = 1000;
+  const PARTICLE_FRICTION = PB.friction;
+  const PARTICLE_MIN_DRIFT_SPEED = PB.minDrift;
+  const PARTICLE_VORTEX_RADIUS = 45;
+  const PARTICLE_VORTEX_STRENGTH = 0.9;
+  const PARTICLE_VORTEX_MIN_DIST = 10;
+  const PARTICLE_PADDLE_PUSH_RADIUS = 40;
+  const PARTICLE_PADDLE_PUSH_STRENGTH = 1.1;
+  const PARTICLE_PADDLE_REPEL_STRENGTH = 3.5;
+  const PARTICLE_PADDLE_DRAG = 0.35;
+  const PARTICLE_GRAVITY = PB.gravity;
+  const PARTICLE_WEIGHT_MIN = PB.weightMin, PARTICLE_WEIGHT_MAX = PB.weightMax;
+  const PARTICLE_SWAY_AMP_MIN = PB.swayAmpMin, PARTICLE_SWAY_AMP_MAX = PB.swayAmpMax;
+  const PARTICLE_SWAY_SPEED_MIN = PB.swaySpeedMin, PARTICLE_SWAY_SPEED_MAX = PB.swaySpeedMax;
+
+  let particles = [];
+
+  function spawnBurst(bx, by, bw, bh, color){
+    for (let i = 0; i < PARTICLE_COUNT; i++) {
+      const weight = PARTICLE_WEIGHT_MIN + Math.random() * (PARTICLE_WEIGHT_MAX - PARTICLE_WEIGHT_MIN);
+      particles.push({
+        x: bx + Math.random() * bw,
+        y: by + Math.random() * bh,
+        vx: (Math.random() - 0.5) * PARTICLE_JITTER,
+        vy: (Math.random() - 0.5) * PARTICLE_JITTER,
+        startTime: T,
+        color: color,
+        weight: weight,
+        swayPhase: Math.random() * Math.PI * 2,
+        swayAmp: (PARTICLE_SWAY_AMP_MIN + Math.random() * (PARTICLE_SWAY_AMP_MAX - PARTICLE_SWAY_AMP_MIN)) / weight,
+        swaySpeed: PARTICLE_SWAY_SPEED_MIN + Math.random() * (PARTICLE_SWAY_SPEED_MAX - PARTICLE_SWAY_SPEED_MIN)
+      });
+    }
+  }
+
+  function updateParticles(now){
+    particles = particles.filter(p => now - p.startTime < PARTICLE_LIFETIME_MS && p.y < H + PARTICLE_SIZE * 2);
+    const paddleVX = clamp(playerX - prevPlayerX, -MAX_PADDLE_VX_FOR_SPIN, MAX_PADDLE_VX_FOR_SPIN);
+    for (const p of particles) {
+      let ballCenterX = null, ballCenterY = null, nearestDist = Infinity;
+      for (const b of balls) {
+        const cx = b.x + BALL_SIZE/2, cy = b.y + BALL_SIZE/2;
+        const d = (cx - p.x) * (cx - p.x) + (cy - p.y) * (cy - p.y);
+        if (d < nearestDist) { nearestDist = d; ballCenterX = cx; ballCenterY = cy; }
+      }
+      if (ballCenterX !== null) {
+        const dx = ballCenterX - p.x;
+        const dy = ballCenterY - p.y;
+        const dist = Math.max(PARTICLE_VORTEX_MIN_DIST, Math.sqrt(dx*dx + dy*dy));
+        if (dist < PARTICLE_VORTEX_RADIUS) {
+          const nx = dx / dist, ny = dy / dist;
+          const tx = -ny, ty = nx;
+          const strength = PARTICLE_VORTEX_STRENGTH * (1 - dist / PARTICLE_VORTEX_RADIUS);
+          p.vx += (tx + nx * 0.25) * strength;
+          p.vy += (ty + ny * 0.25) * strength;
+        }
+      }
+      const paddleCenterX = playerX + PADDLE_W/2;
+      const paddleCenterY = playerY + PADDLE_H/2;
+      const inside = (p.x > playerX && p.x < playerX + PADDLE_W && p.y > playerY && p.y < playerY + PADDLE_H);
+      let pdx, pdy, pdist;
+      if (inside) {
+        pdx = p.x - paddleCenterX;
+        pdy = p.y - paddleCenterY;
+        pdist = Math.sqrt(pdx*pdx + pdy*pdy) || 0.001;
+      } else {
+        const closestX = clamp(p.x, playerX, playerX + PADDLE_W);
+        const closestY = clamp(p.y, playerY, playerY + PADDLE_H);
+        pdx = p.x - closestX;
+        pdy = p.y - closestY;
+        pdist = Math.max(PARTICLE_VORTEX_MIN_DIST, Math.sqrt(pdx*pdx + pdy*pdy));
+      }
+      if (inside || pdist < PARTICLE_PADDLE_PUSH_RADIUS) {
+        const pnx = pdx / pdist, pny = pdy / pdist;
+        const closeness = inside ? 1 : 1 - pdist / PARTICLE_PADDLE_PUSH_RADIUS;
+        const strength = inside ? PARTICLE_PADDLE_REPEL_STRENGTH : PARTICLE_PADDLE_PUSH_STRENGTH * closeness;
+        p.vx += pnx * strength + paddleVX * PARTICLE_PADDLE_DRAG * closeness;
+        p.vy += pny * strength;
+        if (inside) {
+          p.x = paddleCenterX + pnx * (PADDLE_W/2 + 2);
+          p.y = paddleCenterY + pny * (PADDLE_H/2 + 2);
+        }
+      }
+      p.vx *= PARTICLE_FRICTION;
+      p.vy *= PARTICLE_FRICTION;
+      p.vy += PARTICLE_GRAVITY * p.weight;
+      const speed = Math.sqrt(p.vx*p.vx + p.vy*p.vy);
+      if (speed > 0.0001 && speed < PARTICLE_MIN_DRIFT_SPEED) {
+        const scale = PARTICLE_MIN_DRIFT_SPEED / speed;
+        p.vx *= scale;
+        p.vy *= scale;
+      }
+      p.x += p.vx;
+      p.y += p.vy;
+      p.x += Math.sin(now * p.swaySpeed + p.swayPhase) * p.swayAmp;
+    }
+  }
+
+  const PARTICLE_BASE_ALPHA = PB.baseAlpha;
+  function drawParticles(now){
+    for (const p of particles) {
+      const t = (now - p.startTime) / PARTICLE_LIFETIME_MS;
+      const fallFade = Math.min(1, (H + PARTICLE_SIZE * 2 - p.y) / 40);
+      const timeFade = t < 0.85 ? 1 : Math.max(0, 1 - (t - 0.85) / 0.15);
+      ctx.globalAlpha = Math.min(fallFade, timeFade) * PARTICLE_BASE_ALPHA;
+      ctx.fillStyle = p.color;
+      ctx.fillRect(p.x - PARTICLE_SIZE/2, p.y - PARTICLE_SIZE/2, PARTICLE_SIZE, PARTICLE_SIZE);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // Spin: dragging the paddle sideways as it hits the ball bends the ball's onward path.
+  const SPIN_IMPACT_FACTOR = 0.4;
+  const SPIN_CARRY_FACTOR = 0.6;
+  const SPIN_ACCEL = 0.06;
+  const SPIN_DECAY = 0.97;
+  const MAX_PADDLE_VX_FOR_SPIN = 20;
+  const PADDLE_HITBOX_PAD_PER_VX = 1.4;
+  const PADDLE_HITBOX_MAX_PAD = 26;
+  const MAX_SPIN = 6;
+  const MAX_BALL_VX = 20;
+
+  const clamp = CP.clamp;
+
+  function isBallHard(b){ return b.speed >= BALL_BREAKTHROUGH_SPEED; }
+
+  // Ball trail while the ball is "hard" (at breakthrough speed).
+  const BALL_DEFAULT_COLOR = C.ink;
+  const BALL_TRAIL_SIZE = 3;
+  const BALL_TRAIL_LIFETIME_MS = 220;
+  const BALL_TRAIL_SPAWN_PER_FRAME = 3;
+  let ballTrail = [];
+
+  function spawnBallTrail(b){
+    const color = b.powerColor || BALL_DEFAULT_COLOR;
+    for (let i = 0; i < BALL_TRAIL_SPAWN_PER_FRAME; i++) {
+      ballTrail.push({
+        x: b.x + BALL_SIZE/2 + (Math.random() - 0.5) * BALL_SIZE * 0.7,
+        y: b.y + BALL_SIZE/2 + (Math.random() - 0.5) * BALL_SIZE * 0.7,
+        startTime: T, color: color
+      });
+    }
+  }
+  function updateBallTrail(now){ ballTrail = ballTrail.filter(p => now - p.startTime < BALL_TRAIL_LIFETIME_MS); }
+  function drawBallTrail(now){
+    for (const p of ballTrail) {
+      const t = (now - p.startTime) / BALL_TRAIL_LIFETIME_MS;
+      ctx.globalAlpha = Math.max(0, 1 - t);
+      ctx.fillStyle = p.color;
+      ctx.fillRect(p.x - BALL_TRAIL_SIZE/2, p.y - BALL_TRAIL_SIZE/2, BALL_TRAIL_SIZE, BALL_TRAIL_SIZE);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // Ghost trail (GhostTrail): hard-edged copies behind the paddle and every ball.
+  let smoothedPlayerVX = 0, smoothedPlayerVY = 0;
+
+  let running = false;     // a ball is in flight (false = serving)
+  let bannerUntil = 0;     // AREA COMPLETE holds until this game time...
+  let bannerAcked = true;  // ...and, with MESSAGES: STAY, until the next key or tap
+
+  function bannerUp(){
+    return T < bannerUntil || (shell.messagesStay() && !bannerAcked);
+  }
+  // The player's key or tap: ends a held banner or poem line (MESSAGES: STAY).
+  function playerInput(){
+    lastInputT = T;
+    if (T >= bannerUntil) bannerAcked = true;
+  }
+
+  function ballsRemainingOnWall(){
+    return bricks.some(b => !b.hit && b.type !== 'indestructible');
+  }
+
+  function resetBall(){
+    const b = makeBall(playerX + PADDLE_W/2 - BALL_SIZE/2, playerY - BALL_SIZE - 2);
+    b.speed = Math.min(5.4 + (level - 1) * 0.6, 11);
+    balls = [b];
+    colorOrb = null;
+    fallingBricks = [];
+  }
+
+  function launchBall(){
+    const b = balls[0];
+    const angle = (Math.random() * 0.7 - 0.35);
+    b.vx = Math.sin(angle) * b.speed;
+    b.vy = -Math.cos(angle) * b.speed;
+    running = true;
+  }
+
+  function startRound(){
+    if (running || bannerUp()) return;
+    resetBall();
+    launchBall();
+  }
+
+  const BALL_FADE_OUT_MS = 700;
+  let fadingBalls = [];
+
+  function nextLevel(){
+    fadingBalls = balls.map(b => ({ x: b.x, y: b.y, color: b.powerColor || BALL_DEFAULT_COLOR, startTime: T }));
+    level++;
+    buildBricks();
+    particles = [];
+    resetPoem();
+    running = false;
+    bannerUntil = T + AREA_COMPLETE_PAUSE_MS;
+    bannerAcked = false;
+    resetBall();
+    say('Area complete. Level ' + level + '.');
+  }
+
+  // Input: pointer (mouse or touch) moves the paddle; a click or tap launches.
+  function movePlayerTo(clientX){
+    const rect = canvas.getBoundingClientRect();
+    const scale = W / rect.width;
+    let x = (clientX - rect.left) * scale - PADDLE_W/2;
+    playerX = Math.max(0, Math.min(W - PADDLE_W, x));
+  }
+  canvas.addEventListener('pointermove', (e) => {
+    if (!shell.isPlaying()) return;
+    movePlayerTo(e.clientX);
+  });
+  // Runs after the Shell's capture listener: taps the Shell used never get here.
+  canvas.addEventListener('pointerdown', (e) => {
+    canvas.focus({ preventScroll: true });
+    if (!shell.isPlaying()) return;
+    e.preventDefault();
+    const wasHeld = shell.messagesStay() && !bannerAcked && T >= bannerUntil;
+    playerInput();
+    movePlayerTo(e.clientX);
+    if (!wasHeld) startRound();
+  });
+
+  function resetGame(){
+    score = 0;
+    lives = STARTING_LIVES;
+    level = 1;
+    bricksBroken = 0;
+    comboMultiplier = 0;
+    comboWindowEnd = 0;
+    playerX = W/2 - PADDLE_W/2;
+    prevPlayerX = playerX;
+    playerY = PLAYER_REST_Y;
+    prevPlayerY = playerY;
+    particles = [];
+    ballTrail = [];
+    fadingBalls = [];
+    sky.progress = 0;
+    bannerUntil = 0; bannerAcked = true;
+    resetPoem();
+    buildBricks();
+    resetBall();
+    running = false;
+    shell.setScore(0);
+  }
+
+  function rectsOverlap(ax,ay,aw,ah,bx,by,bw,bh){
+    return ax < bx+bw && ax+aw > bx && ay < by+bh && ay+ah > by;
+  }
+
+  function registerBrickHit(b, forceFall){
+    b.hit = true;
+    bricksBroken++;
+    comboMultiplier = (T <= comboWindowEnd) ? comboMultiplier + 1 : 1;
+    comboWindowEnd = T + COMBO_WINDOW_MS;
+    score += b.points * comboMultiplier;
+    spawnBurst(b.x, b.y, b.w, b.h, b.color);
+    playPing(PING_SCALE[Math.floor(Math.random() * PING_SCALE.length)]);
+    if (b.special) spawnColorOrb(b);
+    if (forceFall || Math.random() < FALLING_BRICK_CHANCE) spawnFallingBrick(b);
+  }
+
+  // Falling bricks: a broken brick may drop as a catchable bonus.
+  const FALLING_BRICK_CHANCE = 0.10;
+  const FALLING_BRICK_SPEED = 2.2;
+  let fallingBricks = [];
+
+  function spawnFallingBrick(b){
+    fallingBricks.push({ x: b.x, y: b.y, w: b.w, h: b.h, color: b.color, points: b.points, type: b.type, hp: b.hp, maxHp: b.maxHp });
+  }
+
+  function updateFallingBricks(){
+    for (let i = fallingBricks.length - 1; i >= 0; i--) {
+      const fb = fallingBricks[i];
+      fb.y += FALLING_BRICK_SPEED;
+      if (rectsOverlap(fb.x, fb.y, fb.w, fb.h, playerX, playerY, PADDLE_W, PADDLE_H)) {
+        score += fb.points;
+        spawnBurst(fb.x, fb.y, fb.w, fb.h, fb.color);
+        playCatch();
+        fallingBricks.splice(i, 1);
+        fallingBricksCaught++;
+        if (fallingBricksCaught >= BRICK_COLS) {
+          fallingBricksCaught -= BRICK_COLS;
+          triggerColumnPulse();
+        }
+      } else if (fb.y > H) {
+        fallingBricks.splice(i, 1);
+      }
+    }
+  }
+
+  function drawFallingBricks(){
+    for (const fb of fallingBricks) {
+      ctx.fillStyle = fb.color;
+      ctx.fillRect(fb.x, fb.y, fb.w, fb.h);
+      drawBrickMarks(ctx, fb, fb.type, fb.hp, fb.maxHp);
+    }
+  }
+
+  // Column pulse: catching a full row of falling bricks fires a beam that
+  // clears the lowest brick in every column. The field freezes for it.
+  const PULSE_FADE_IN_MS = 400;
+  const PULSE_DURATION_MS = 1050;
+  const PULSE_THICKNESS = BRICK_H;
+  const PULSE_COLOR = C.ink;
+  const PULSE_ALPHA = 0.5;
+  const PULSE_START_Y = PLAYER_REST_Y - 10 - BRICK_H - (BRICK_H + BRICK_ROW_GAP);
+
+  function triggerColumnPulse(){
+    const targets = [];
+    for (let col = 0; col < BRICK_COLS; col++) {
+      let best = null;
+      for (const b of bricks) {
+        if (b.col !== col || b.hit) continue;
+        if (!best || b.y > best.y) best = b;
+      }
+      targets.push(best);
+    }
+    pulse = { phase: 'fadeIn', phaseStart: T, targets };
+    say('Column pulse.');
+  }
+
+  function updatePulse(now){
+    if (!pulse) return;
+    const elapsed = now - pulse.phaseStart;
+    if (pulse.phase === 'fadeIn') {
+      if (elapsed >= PULSE_FADE_IN_MS) {
+        pulse.phase = 'sweep';
+        pulse.phaseStart = now;
+        playPulse();
+      }
+      return;
+    }
+    const t = Math.min(1, elapsed / PULSE_DURATION_MS);
+    const frontY = PULSE_START_Y * (1 - t);
+    for (const target of pulse.targets) {
+      if (!target || target.hit || target.resolved || target.pendingExplode) continue;
+      if (frontY <= target.y + target.h) {
+        target.resolved = true;
+        if (target.type !== 'indestructible') {
+          target.pendingExplode = true;
+          target.pendingStart = now;
+        }
+      }
+    }
+    if (elapsed >= PULSE_DURATION_MS) pulse = null;
+  }
+
+  function drawPulse(now){
+    if (!pulse) return;
+    const elapsed = now - pulse.phaseStart;
+    if (pulse.phase === 'fadeIn') {
+      ctx.globalAlpha = PULSE_ALPHA * Math.min(1, elapsed / PULSE_FADE_IN_MS);
+      ctx.fillStyle = PULSE_COLOR;
+      ctx.fillRect(0, PULSE_START_Y - PULSE_THICKNESS/2, W, PULSE_THICKNESS);
+      ctx.globalAlpha = 1;
+      return;
+    }
+    const t = Math.min(1, elapsed / PULSE_DURATION_MS);
+    const frontY = PULSE_START_Y * (1 - t);
+    ctx.globalAlpha = PULSE_ALPHA;
+    ctx.fillStyle = PULSE_COLOR;
+    ctx.fillRect(0, frontY - PULSE_THICKNESS/2, W, PULSE_THICKNESS);
+    ctx.globalAlpha = 1;
+  }
+
+  const METER_Y = PULSE_START_Y;
+
+  function spawnColorOrb(b){
+    colorOrb = { x: W/2 - BALL_SIZE/2, y: H/2 - BALL_SIZE/2, w: BALL_SIZE, h: BALL_SIZE, color: b.color, tier: tierOf(b.points) };
+  }
+
+  // Colour-chain destroy: a charged ball flood-fills the connected same-colour patch.
+  function colorChainDestroy(startBrick){
+    const color = startBrick.color;
+    const stack = [startBrick];
+    const seen = new Set();
+    const connected = [];
+    while (stack.length) {
+      const cur = stack.pop();
+      const key = cur.row + ',' + cur.col;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (cur.hit || cur.pendingExplode || cur.color !== color) continue;
+      connected.push(cur);
+      for (const nb of bricks) {
+        if (nb.hit || nb.pendingExplode || nb.color !== color) continue;
+        if (Math.abs(nb.row - cur.row) + Math.abs(nb.col - cur.col) === 1) stack.push(nb);
+      }
+    }
+    registerBrickHit(startBrick);
+    for (const br of connected) {
+      if (br === startBrick) continue;
+      br.pendingExplode = true;
+      br.pendingStart = T;
+    }
+  }
+
+  const ORB_BONUS_FRACTION = 0.20;
+  const PENDING_EXPLODE_MS = 1000;
+  const PENDING_EXPLODE_MAX_SCALE = 1.5;
+
+  function destroyRandomColorBricks(color, fraction){
+    const matching = bricks.filter(b => b.type === 'color' && b.color === color && !b.hit && !b.pendingExplode);
+    if (matching.length === 0) return;
+    const count = Math.min(matching.length, Math.max(1, Math.ceil(matching.length * fraction)));
+    for (let i = matching.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      const tmp = matching[i]; matching[i] = matching[j]; matching[j] = tmp;
+    }
+    for (let i = 0; i < count; i++) {
+      matching[i].pendingExplode = true;
+      matching[i].pendingStart = T;
+    }
+  }
+
+  function updatePendingExplosions(now){
+    for (const b of bricks) {
+      if (b.pendingExplode && !b.hit && now - b.pendingStart >= PENDING_EXPLODE_MS) registerBrickHit(b);
+    }
+  }
+
+  function lerpColorToWhite(hex, t){
+    const r = parseInt(hex.slice(1, 3), 16);
+    const g = parseInt(hex.slice(3, 5), 16);
+    const b = parseInt(hex.slice(5, 7), 16);
+    return 'rgb(' + Math.round(r + (255 - r) * t) + ',' + Math.round(g + (255 - g) * t) + ',' + Math.round(b + (255 - b) * t) + ')';
+  }
+
+  // One 60Hz step of game time. Called only while the Shell says PLAYING.
+  let heldBefore = false;
+  function step(){
+    const now = T;
+
+    // keyboard steering (hold actions; TAP ON/OFF works through isDown)
+    const left = shell.isDown('left'), right = shell.isDown('right');
+    if ((left || right) && !heldBefore) playerInput();
+    heldBefore = left || right;
+    const kb = KB_SPEED * shell.steering();
+    if (left) playerX -= kb;
+    if (right) playerX += kb;
+    playerX = Math.max(0, Math.min(W - PADDLE_W, playerX));
+
+    sky.update(wallProgress());
+    if (running) updatePoem(now); // the narrator speaks while the ball is in flight
+    updateParticles(now);
+    updateBallTrail(now);
+
+    stepCore(now);
+
+    // ghost smoothing and paddle velocity, per step so a pause freezes them
+    smoothedPlayerVX = CP.smoothVelocity(smoothedPlayerVX, playerX - prevPlayerX);
+    smoothedPlayerVY = CP.smoothVelocity(smoothedPlayerVY, playerY - prevPlayerY);
+    for (const ball of balls) {
+      ball.smoothedVX = CP.smoothVelocity(ball.smoothedVX, ball.vx);
+      ball.smoothedVY = CP.smoothVelocity(ball.smoothedVY, ball.vy);
+    }
+    prevPlayerX = playerX;
+    prevPlayerY = playerY;
+    shell.setScore(score);
+  }
+
+  function stepCore(now){
+    if (!running) {
+      // the serve ball rides on the paddle while waiting to launch
+      if (balls[0]) {
+        balls[0].x = playerX + PADDLE_W/2 - BALL_SIZE/2;
+        balls[0].y = playerY - BALL_SIZE - 2;
+      }
+      return;
+    }
+
+    if (pulse) {
+      updatePulse(now);
+      return; // the whole field freezes for the pulse's fade-in and sweep
+    }
+
+    const newlyAwakened = [];
+
+    for (const ball of balls) {
+      if (ball.spin) {
+        ball.vx = clamp(ball.vx + ball.spin * SPIN_ACCEL, -MAX_BALL_VX, MAX_BALL_VX);
+        ball.spin *= SPIN_DECAY;
+        if (Math.abs(ball.spin) < 0.02) ball.spin = 0;
+      }
+
+      const SUBSTEPS = 8;
+      let stepVX = ball.vx / SUBSTEPS;
+      let stepVY = ball.vy / SUBSTEPS;
+      let bounced = false;
+
+      for (let s = 1; s <= SUBSTEPS && !bounced; s++) {
+        ball.x += stepVX;
+        ball.y += stepVY;
+
+        if (ball.x <= 0) { ball.x = 0; ball.vx *= -1; stepVX *= -1; ball.breakStreak = 0; }
+        if (ball.x + BALL_SIZE >= W) { ball.x = W - BALL_SIZE; ball.vx *= -1; stepVX *= -1; ball.breakStreak = 0; }
+        if (ball.y <= 0) { ball.y = 0; ball.vy *= -1; stepVY *= -1; ball.breakStreak = 0; }
+
+        const framePlayerX = prevPlayerX + (playerX - prevPlayerX) * (s / SUBSTEPS);
+        const framePlayerY = prevPlayerY + (playerY - prevPlayerY) * (s / SUBSTEPS);
+
+        const paddleVX = clamp(playerX - prevPlayerX, -MAX_PADDLE_VX_FOR_SPIN, MAX_PADDLE_VX_FOR_SPIN);
+        const hitboxPad = Math.min(PADDLE_HITBOX_MAX_PAD, Math.abs(paddleVX) * PADDLE_HITBOX_PAD_PER_VX);
+        if (!bounced && ball.vy > 0 && rectsOverlap(ball.x, ball.y, BALL_SIZE, BALL_SIZE, framePlayerX - hitboxPad, framePlayerY, PADDLE_W + hitboxPad * 2, PADDLE_H)) {
+          ball.y = framePlayerY - BALL_SIZE;
+          const hit = (ball.x + BALL_SIZE/2) - (framePlayerX + PADDLE_W/2);
+          const norm = clamp(hit / (PADDLE_W/2), -1, 1);
+          ball.speed = Math.min(ball.speed + 0.15, 12);
+          const angle = norm * (Math.PI/3.2);
+          ball.vx = Math.sin(angle) * ball.speed;
+          ball.vy = -Math.cos(angle) * ball.speed;
+          ball.vx = clamp(ball.vx + paddleVX * SPIN_IMPACT_FACTOR, -MAX_BALL_VX, MAX_BALL_VX);
+          ball.spin = clamp(paddleVX * SPIN_CARRY_FACTOR, -MAX_SPIN, MAX_SPIN);
+          playPaddleTap(Math.abs(paddleVX) / MAX_PADDLE_VX_FOR_SPIN);
+          ball.breakStreak = 0;
+          bounced = true;
+        }
+
+        if (!bounced) {
+          for (let di = dormantBalls.length - 1; di >= 0; di--) {
+            const db = dormantBalls[di];
+            if (!rectsOverlap(ball.x, ball.y, BALL_SIZE, BALL_SIZE, db.x, db.y, db.w, db.h)) continue;
+            const ballCX = ball.x + BALL_SIZE/2;
+            const ballCY = ball.y + BALL_SIZE/2;
+            const dbCX = db.x + db.w/2;
+            const dbCY = db.y + db.h/2;
+            const overlapX = (db.w/2 + BALL_SIZE/2) - Math.abs(ballCX - dbCX);
+            const overlapY = (db.h/2 + BALL_SIZE/2) - Math.abs(ballCY - dbCY);
+            if (overlapX < overlapY) {
+              ball.vx *= -1; stepVX *= -1;
+              ball.x = ballCX < dbCX ? db.x - BALL_SIZE : db.x + db.w;
+            } else {
+              ball.vy *= -1; stepVY *= -1;
+              ball.y = ballCY < dbCY ? db.y - BALL_SIZE : db.y + db.h;
+            }
+            bounced = true;
+            ball.breakStreak = 0;
+
+            let dx = dbCX - ballCX;
+            let dy = dbCY - ballCY;
+            const dlen = Math.sqrt(dx*dx + dy*dy) || 1;
+            dx /= dlen; dy /= dlen;
+            if (Math.abs(dy) < WAKE_MIN_VY_FRACTION) {
+              const ySign = dy === 0 ? 1 : Math.sign(dy);
+              const xSign = dx === 0 ? (Math.random() < 0.5 ? -1 : 1) : Math.sign(dx);
+              dy = ySign * WAKE_MIN_VY_FRACTION;
+              dx = xSign * Math.sqrt(Math.max(0, 1 - dy*dy));
+            }
+            const woken = makeBall(dbCX - BALL_SIZE/2, dbCY - BALL_SIZE/2);
+            woken.speed = ball.speed * WAKE_SPEED_FACTOR;
+            woken.vx = dx * woken.speed;
+            woken.vy = dy * woken.speed;
+            newlyAwakened.push(woken);
+
+            dormantBalls.splice(di, 1);
+            playPowerUp();
+            spawnBurst(db.x, db.y, db.w, db.h, BALL_DEFAULT_COLOR);
+            break;
+          }
+        }
+
+        if (!bounced) {
+          for (const b of bricks) {
+            if (b.hit) continue;
+            if (rectsOverlap(ball.x, ball.y, BALL_SIZE, BALL_SIZE, b.x, b.y, b.w, b.h)) {
+              const ballCX = ball.x + BALL_SIZE/2;
+              const ballCY = ball.y + BALL_SIZE/2;
+              const overlapX = (b.w/2 + BALL_SIZE/2) - Math.abs(ballCX - (b.x + b.w/2));
+              const overlapY = (b.h/2 + BALL_SIZE/2) - Math.abs(ballCY - (b.y + b.h/2));
+
+              if (b.type === 'indestructible') {
+                if (overlapX < overlapY) {
+                  ball.vx *= -1; stepVX *= -1;
+                  ball.x = ballCX < b.x + b.w/2 ? b.x - BALL_SIZE : b.x + b.w;
+                } else {
+                  ball.vy *= -1; stepVY *= -1;
+                  ball.y = ballCY < b.y + b.h/2 ? b.y - BALL_SIZE : b.y + b.h;
+                }
+                bounced = true;
+                ball.breakStreak = 0;
+                playThud();
+                break;
+              }
+
+              if (b.type === 'color' && ball.powerColor && ball.powerColor === b.color) {
+                colorChainDestroy(b);
+                ball.powerColor = null;
+                ball.powerTier = 0;
+                break;
+              }
+
+              if (b.type === 'hard') {
+                b.hp--;
+                if (b.hp > 0) {
+                  if (overlapX < overlapY) {
+                    ball.vx *= -1; stepVX *= -1;
+                    ball.x = ballCX < b.x + b.w/2 ? b.x - BALL_SIZE : b.x + b.w;
+                  } else {
+                    ball.vy *= -1; stepVY *= -1;
+                    ball.y = ballCY < b.y + b.h/2 ? b.y - BALL_SIZE : b.y + b.h;
+                  }
+                  bounced = true;
+                  ball.breakStreak = 0;
+                  playCrack();
+                  b.color = HARD_CRACK_COLOR;
+                  spawnBurst(b.x, b.y, b.w, b.h, HARD_CRACK_COLOR);
+                  break;
+                }
+              }
+
+              const hardBall = isBallHard(ball) && ball.breakStreak < BALL_BREAKTHROUGH_MAX;
+              const hitFromSide = overlapX < overlapY;
+              if (!hardBall) {
+                if (hitFromSide) {
+                  ball.vx *= -1; stepVX *= -1;
+                  ball.x = ballCX < b.x + b.w/2 ? b.x - BALL_SIZE : b.x + b.w;
+                } else {
+                  ball.vy *= -1; stepVY *= -1;
+                  ball.y = ballCY < b.y + b.h/2 ? b.y - BALL_SIZE : b.y + b.h;
+                }
+                bounced = true;
+                ball.breakStreak = 0;
+              } else {
+                ball.breakStreak++;
+              }
+              registerBrickHit(b, hitFromSide);
+              break;
+            }
+          }
+        }
+      }
+
+      if (isBallHard(ball)) spawnBallTrail(ball);
+
+      if (colorOrb && rectsOverlap(ball.x, ball.y, BALL_SIZE, BALL_SIZE, colorOrb.x, colorOrb.y, colorOrb.w, colorOrb.h)) {
+        ball.powerColor = colorOrb.color;
+        ball.powerTier = colorOrb.tier;
+        spawnBurst(colorOrb.x, colorOrb.y, colorOrb.w, colorOrb.h, colorOrb.color);
+        playPowerUp();
+        destroyRandomColorBricks(colorOrb.color, ORB_BONUS_FRACTION);
+        colorOrb = null;
+      }
+    }
+
+    if (newlyAwakened.length) balls.push(...newlyAwakened);
+
+    updateFallingBricks();
+    updatePendingExplosions(now);
+
+    // a ball is only lost once every ball has fallen off the bottom
+    balls = balls.filter(b => b.y <= H + BALL_SIZE);
+    if (balls.length === 0) {
+      lives--;
+      running = false;
+      if (lives <= 0) {
+        shell.setScore(score);
+        shell.lose({ title: 'GAME OVER', lines: ['LEVEL ' + String(level).padStart(2, '0'), bricksBroken + ' BRICKS BROKEN'] });
+        return;
+      }
+      resetBall();
+      say('Ball lost. ' + lives + (lives === 1 ? ' ball' : ' balls') + ' left.');
+    }
+
+    if (!ballsRemainingOnWall()) nextLevel();
+  }
+
+  // ---- drawing ----
+  const grid = CP.createScopeGrid({ color: C.gridPhosphor, centerColor: C.gridPhosphorCenter });
+
+  function drawBricks(now){
+    for (const b of bricks) {
+      if (b.hit || b.pendingExplode) continue;
+      CP.drawBrick(ctx, b);
+      drawBrickMarks(ctx, b, b.type, b.hp, b.maxHp);
+    }
+    // pending-explosion bricks fade to white (and, with full motion, grow) before they go
+    const still = CP.motionReduced();
+    for (const b of bricks) {
+      if (b.hit || !b.pendingExplode) continue;
+      const t = Math.min(1, (now - b.pendingStart) / PENDING_EXPLODE_MS);
+      const scale = still ? 1 : 1 + (PENDING_EXPLODE_MAX_SCALE - 1) * t;
+      const w = b.w * scale, h = b.h * scale;
+      ctx.fillStyle = lerpColorToWhite(b.color, t);
+      ctx.fillRect(b.x - (w - b.w) / 2, b.y - (h - b.h) / 2, w, h);
+    }
+  }
+
+  function launchPrompt(){
+    return (TOUCH ? 'TAP OR ' : 'CLICK OR ') + shell.keyFor('launch') + ' TO LAUNCH';
+  }
+
+  function drawServeOverlay(){
+    if (!shell.isPlaying() || running) return;
+    const lines = bannerUp()
+      ? [{ text: 'AREA COMPLETE', size: 1.4, dy: 0, glow: 2 }]
+      : [{ text: 'LEVEL ' + level, size: 1.4, dy: -10, glow: 2 },
+         { text: launchPrompt(), size: 0.85, dy: 30, glow: 1, blink: !CP.motionReduced() }];
+    CP.drawOverlay(hudCtx, W, H, lines, { scrim: true, now: T });
+  }
+
+  function draw(){
+    const now = T;
+    ctx.fillStyle = sky.color();
+    ctx.fillRect(0, 0, W, H);
+    vignetteEl.style.opacity = String(sky.vignetteOpacity());
+    // The grid eases toward its focus every frame; off play, aim it where it already is so a pause freezes it.
+    if (shell.isPlaying()) grid.draw(ctx, W, H, playerX + PADDLE_W/2, balls[0] ? balls[0].y : PLAYER_REST_Y);
+    else grid.draw(ctx, W, H, W/2 + grid.ox / grid.parallaxMax * (W/2), H/2 + grid.oy / grid.parallaxMax * (H/2));
+
+    drawBricks(now);
+    drawParticles(now);
+    drawFallingBricks();
+    drawPulse(now);
+    CP.drawCatchMeter(ctx, W, METER_Y, fallingBricksCaught);
+    if (colorOrb) {
+      ctx.fillStyle = colorOrb.color;
+      ctx.fillRect(colorOrb.x, colorOrb.y, colorOrb.w, colorOrb.h);
+      drawPips(ctx, colorOrb.x, colorOrb.y, colorOrb.w, colorOrb.tier);
+    }
+
+    // dormant balls: a dim ink so they read as inactive
+    ctx.globalAlpha = 0.55;
+    ctx.fillStyle = BALL_DEFAULT_COLOR;
+    for (const db of dormantBalls) ctx.fillRect(db.x, db.y, db.w, db.h);
+    ctx.globalAlpha = 1;
+
+    ctx.fillStyle = C.ink;
+    CP.drawGhosts(ctx, playerX, playerY, PADDLE_W, PADDLE_H, smoothedPlayerVX, smoothedPlayerVY);
+    CP.drawPaddle(ctx, playerX, playerY, PADDLE_W, PADDLE_H);
+
+    drawBallTrail(now);
+    for (const ball of balls) {
+      ctx.fillStyle = ball.powerColor || BALL_DEFAULT_COLOR;
+      CP.drawGhosts(ctx, ball.x, ball.y, BALL_SIZE, BALL_SIZE, ball.smoothedVX, ball.smoothedVY);
+      CP.drawBall(ctx, ball.x, ball.y, ball.powerColor || BALL_DEFAULT_COLOR, BALL_SIZE);
+      if (ball.powerColor) drawPips(ctx, ball.x, ball.y, BALL_SIZE, ball.powerTier);
+    }
+
+    if (fadingBalls.length) {
+      fadingBalls = fadingBalls.filter(fb => now - fb.startTime < BALL_FADE_OUT_MS);
+      for (const fb of fadingBalls) {
+        ctx.globalAlpha = Math.max(0, 1 - (now - fb.startTime) / BALL_FADE_OUT_MS);
+        ctx.fillStyle = fb.color;
+        ctx.fillRect(fb.x, fb.y, BALL_SIZE, BALL_SIZE);
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    hudCtx.clearRect(0, 0, W, H);
+    CP.drawHud(hudCtx, W, {
+      lives, maxLives: STARTING_LIVES, score: shell.score,
+      combo: (comboMultiplier >= 2 && now <= comboWindowEnd) ? comboMultiplier : 0,
+      right: shell.hudRight(W, 1)
+    });
+    if (running) drawPoem(now);
+    drawServeOverlay();
+    shell.draw(hudCtx, W, H, 1);
+  }
+
+  // ---- the frame around the game ----
+  const shell = CP.createShell({
+    id: 'cp-breakout',
+    canvas,
+    layout: 'portrait',
+    title: 'BREAKOUT',
+    howTo: ['MOVE THE PADDLE, KEEP THE BALL UP', 'BREAK EVERY BRICK', 'MORE NOTCHES SCORE MORE'],
+    actions: [
+      { id: 'left', label: 'MOVE LEFT', keys: ['arrowleft'], hold: true, group: 'move' },
+      { id: 'right', label: 'MOVE RIGHT', keys: ['arrowright'], hold: true, group: 'move' },
+      { id: 'launch', label: 'LAUNCH', keys: [' '] },
+      { id: 'drag', label: 'MOVE PADDLE', display: TOUCH ? 'DRAG' : 'MOUSE', fixed: true }
+    ],
+    onAction: (id) => {
+      if (id !== 'launch') return;
+      const wasHeld = shell.messagesStay() && !bannerAcked && T >= bannerUntil;
+      playerInput();
+      if (!wasHeld) startRound();
+    },
+    steering: true,
+    synth: syn,
+    intro: true,
+    onStart: () => { resetGame(); acc = 0; }
+  });
+
+  let acc = 0;
+  function frame(now){
+    const dt = shell.tick(now);
+    if (dt) {
+      acc += dt;
+      let n = 0;
+      while (acc >= STEP && n < 4 && shell.isPlaying()) { T += STEP * 1000; step(); acc -= STEP; n++; }
+      if (n >= 4) acc = 0;
+    }
+    draw();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
