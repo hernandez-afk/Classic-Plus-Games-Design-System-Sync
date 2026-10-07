@@ -57,9 +57,9 @@ main { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 16px; al
 .screen {
   position: relative; width: 100%; background: var(--void);
   border: 2px solid var(--frame); box-shadow: var(--halo);
-  height: min(78vh, 760px); min-height: 420px;
+  height: min(76vh, 720px); min-height: 420px;
 }
-.screen.portrait { max-width: 520px; margin: 0 auto; aspect-ratio: 420 / 680; height: auto; max-height: 80vh; min-height: 0; }
+/* One cabinet for every game: same size and place whichever tab is open; a portrait game letterboxes inside it. */
 .screen iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; display: block; background: var(--void); }
 .stage-tools { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; justify-content: space-between; color: var(--ink-muted); font-size: 13px; }
 .stage-tools .keys { letter-spacing: 1px; }
@@ -141,11 +141,11 @@ var GAMES = [
   { id: 'moonminer', name: 'Moon Miner', file: 'games/moonminer.html', shape: 'wide', notes: [] }
 ];
 GAMES[1].notes = [
-  '<b>Point notches.</b> Bricks show their value as notches: 1 yellow, 2 green, 3 orange, 4 red. Hard bricks get a frame, steel gets hatching. This closes the ladder&rsquo;s colour-only gap.',
+  '<b>Point notches.</b> Bricks show their value as notches: 1 yellow, 2 green, 3 orange, 4 red. Hard bricks get a frame, steel gets hatching. The design system now draws them for every brick wall.',
   '<b>Shell frame.</b> Boot card, title, how to play, pause, settings and results come from the shared shell. Steering and tap-on/off work for the paddle.',
   '<b>Game time.</b> Physics stepped at 60Hz on shell time: pause freezes everything and GAME SPEED slows it.',
   '<b>Poem narrator</b> back on, one line at a time, read to screen readers. Lost balls and AREA COMPLETE are announced too.',
-  '<b>Known gap.</b> Filled catch-meter slots use the kit&rsquo;s decorative faint ink (under 3:1); filled and empty slots also differ by shape.'
+  '<b>Catch meter.</b> Filled slots are now light grey at 4.5:1 on every sky step, empty ones an outline.'
 ];
 GAMES[2].notes = [
   '<b>Shell frame.</b> The game&rsquo;s own title, serve prompt, game-over screen and initials table are gone; the shell handles them and saves your best score.',
@@ -153,7 +153,7 @@ GAMES[2].notes = [
   '<b>Smash beam</b> is stepped bars, not a gradient, and can fire at most about 3 times a second.',
   '<b>Game time.</b> No more setTimeout: serves, combos and effects freeze on pause and slow with GAME SPEED.',
   '<b>Screen readers</b> hear points, lives lost and combos.',
-  '<b>Known gap.</b> Drag puts the paddle where your finger is, so STEERING only changes keyboard speed.'
+  '<b>Steering.</b> At 100% the paddle sits under your finger. At other STEERING settings a drag moves it by your finger&rsquo;s travel times the setting.'
 ];
 GAMES[0].notes = [
   '<b>Shell frame.</b> Boot card, title, how to play, pause, settings and GAME OVER come from the shared shell. Hyperspace moved from Shift to Down, one press.',
@@ -161,7 +161,7 @@ GAMES[0].notes = [
   '<b>Readable shop.</b> Card text raised to the 0.75 floor and wrapped; locked cards brightened to 4.9:1; FIRE button labelled and brighter.',
   '<b>Flashes and motion.</b> Blinks slowed to 167ms; reduced motion drops the warp streaks and steadies the shield and markers.',
   '<b>Screen readers</b> hear waves, lost ships, power-ups, docking and purchases.',
-  '<b>Known gap.</b> PAUSED is written straight onto space, as the system specifies, so it can overlap rocks.'
+  '<b>Readable screens.</b> Title, pause and results dim the field, so their text never sits on a rock.'
 ];
 GAMES[3].notes = [
   '<b>No mashing.</b> FIRE autofires while down; with HELD KEYS on TAP ON/OFF one press keeps firing. On touch it fires on its own and you only drag.',
@@ -169,7 +169,7 @@ GAMES[3].notes = [
   '<b>Flashes.</b> Explosions no longer cycle colours at 24 a second and the beam no longer flickers. Reduced motion cuts shake and star drift.',
   '<b>Shell frame.</b> Its own title, pause, game-over, initials table, sound button and test buttons are gone; your old best score carries over.',
   '<b>Messages STAY</b> holds the wave banner until you press Space or tap.',
-  '<b>Known gap.</b> The blue saucer is an enemy drawn in the player&rsquo;s signal blue, kept for the game&rsquo;s look; its shape sets it apart.'
+  '<b>Enemies look like enemies.</b> Both saucers are enemy red, never the player&rsquo;s blue. Colours were measured for colour blindness; the three close pairs are told apart by shape and letters.'
 ];
 GAMES[4].notes = [
   '<b>Crashes end the run.</b> A crash or failed mission now goes to the shell&rsquo;s result screen; PLAY AGAIN retries the mission. Your campaign (map, credits, upgrades) is kept. N twice on the star map starts a new one.',
@@ -177,7 +177,7 @@ GAMES[4].notes = [
   '<b>Never colour alone.</b> Gems carry marks by value, dug pads go grey and dashed, brittle decks are cracked, fuel says LOW.',
   '<b>Flashes.</b> Full-screen flashes are under 9% and at most 3 a second, and off under reduced motion, which also cuts shake and the post-casino double vision.',
   '<b>Controls.</b> S now opens settings, so WASD&rsquo;s S is gone; use Down. L leaves the shop or casino.',
-  '<b>Known gaps.</b> Alert and hostile red can share a screen on moons with saucers or lava. The phosphor bloom is kept, and contrast was measured without it.'
+  '<b>Two reds never mix.</b> On moons with saucers or lava, mistakes like LOW FUEL show in white with words and blinking. The glow was measured and toned down so text stays readable beside it.'
 ];
 var CHECKS = [
   ['First play', 'HOW TO PLAY comes first and lists every control.'],
@@ -230,7 +230,6 @@ function tally(){ document.getElementById('tally').textContent = done(current.id
 function select(id, focusGame){
   current = GAMES.filter(function(g){ return g.id === id; })[0] || GAMES[0];
   save('cpta:game', current.id);
-  screen.className = 'screen' + (current.shape === 'portrait' ? ' portrait' : '');
   frame.title = current.name;
   frame.src = current.file;
   renderTabs(); renderSheet();
