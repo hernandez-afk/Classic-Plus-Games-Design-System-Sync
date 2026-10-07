@@ -39,7 +39,11 @@ const C = { ink:K.ink, muted:'#9a9a9a', smoke:'#4a4a4a', blue:K.signal, red:K.br
   faint:K.inkFaint, grid:K.grid, cross:'rgba(255,255,255,0.06)' };
 // colour is meaning: red is worth the most, yellow the least (and every pad says X2..X5 too)
 const MULT_COL = { 2:C.yellow, 3:C.green, 4:C.orange, 5:C.red };
-const GLOW = { tight:0.42, wide:0.55 };
+// phosphor bloom strengths. Measured on rendered frames (bloom only adds light, but it lifts the ground beside a
+// stroke more than the stroke itself, which is already near white): at 0.42 / 0.55 ink text fell to 3.2:1 against
+// its own halo and the lander in the raid beam to 1:1. At these values every text stroke keeps 4.5:1 and every
+// object 3:1 against the bloom-lit ground around it.
+const GLOW = { tight:0.17, wide:0.22 };
 let UI = 1;                                             // HUD / text scale (the 0.75 text floor is 0.75*UI)
 let VW = 1e9;                                           // width text may wrap to (the playfield column)
 
@@ -276,6 +280,20 @@ let volcanoes = [], lava = [], saucers = [], bugs = [], hazT = 0, vfx = [];   //
 const VOLC = { cycle:6, rumble:3.4, erupt:4.4 };
 const LAVA_HOT = 0.9;                                  // seconds a blob stays dangerous
 const lavaHot = b => b.age < LAVA_HOT;
+// ALERT NEVER SHARES A SCREEN WITH HOSTILE. While anything hostile is (or is about to be) on screen - a raid,
+// rival stops on the star map, saucers, volcanoes and their lava, eggs and bugs at the dig, red debris - a
+// mistake or a running-out clock is drawn in ink and leans on its other cues instead (its words, the LOW
+// label, blinking at 3 flashes a second or less). Hazards count for as long as the moon has them, so the
+// colour doesn't flicker as a saucer leaves the screen or a volcano cools.
+function hostileOnScreen(){
+  if (state === 'raid') return true;
+  if (state === 'map') return !!starMap && starMap.nodes.some(n => n.type === 'rival');   // only the chart is drawn
+  if (saucers.length || volcanoes.length || lava.length || bugs.length) return true;
+  if ((state === 'drill' || state === 'drilled') && drill.pad && (drill.pad.eggs || []).length) return true;
+  return parts.some(p => p.col === C.hostile) || rings.some(r => r.col === C.hostile);
+}
+const mistakeColor = () => hostileOnScreen() ? C.ink : C.alert;
+const mc = col => col === C.alert ? mistakeColor() : col;   // resolves a stored alert colour at draw time
 // level plan: how many of each hazard a wave gets (wave 2 onward is the hard layout)
 // hazards arrive gradually: saucers from moon 3, volcanoes from moon 4, doubled up from moons 6 / 7
 const levelPlan = () => ({ volcanoes: wave < 4 ? 0 : wave < 7 ? 1 : 2, saucers: wave < 3 ? 0 : wave < 6 ? 1 : 2 });
@@ -1298,7 +1316,7 @@ function drawMap(t){
     const how = touch ? 'TAP A BRACKETED STOP TO GO' : 'ARROWS CHOOSE - ' + keyLabel('dig') + ' TO GO';
     vtext(ctx, how, W/2, by - 22*UI, 0.75*UI, { align:'center', lw:1.4, color:C.inkMuted });
     const nn = newConfirm > 0 ? 'PRESS ' + keyLabel('newgame') + ' AGAIN TO ERASE THIS CAMPAIGN' : keyLabel('newgame') + ' NEW CAMPAIGN';
-    vtext(ctx, nn, W/2, by, 0.75*UI, { align:'center', lw:1.4, color: newConfirm > 0 ? C.alert : C.inkMuted });
+    vtext(ctx, nn, W/2, by, 0.75*UI, { align:'center', lw:1.4, color: newConfirm > 0 ? mistakeColor() : C.inkMuted });
   }
   if (mapNote) vtext(ctx, mapNote.text, W/2, viewH*0.5, 0.8*UI, { align:'center', color:C.blue, glow:2, lw:1.6 });
   if (mapArrive){
@@ -2335,7 +2353,7 @@ function render(t){
     // window turns red when current speed would crash on touchdown
     // only once the camera has zoomed in: orange = would damage the drill, alert = would crash (and it blinks)
     const fatal = L.vy > HARD_VY || Math.abs(L.vx) > HARD_VX, rough = L.vy > SAFE_VY || Math.abs(L.vx) > SAFE_VX;
-    const wc = state === 'play' && zoomIn && !L.grounded ? (fatal ? (blink(t, 5) ? C.alert : null) : rough ? C.orange : null) : null;
+    const wc = state === 'play' && zoomIn && !L.grounded ? (fatal ? (blink(t, 5) ? mistakeColor() : null) : rough ? C.orange : null) : null;
     const WR = state === 'raid' ? BOMBER_WIN : [-2, -5.5, 4, 3];   // raid bombers: smaller window, set lower
     if (wc){ ctx.fillStyle = wc; ctx.fillRect(WR[0], WR[1], WR[2], WR[3]); ctx.strokeStyle = wc; }
     ctx.beginPath(); ctx.rect(WR[0], WR[1], WR[2], WR[3]); ctx.stroke();
@@ -2361,7 +2379,7 @@ function render(t){
   for (const f of floaters){
     const sx = toSX(f.x), sy = toSY(f.y) - 8 - f.life*30;
     if (f.life < 0) continue;
-    vtext(ctx, f.text, sx, sy, f.sz || 0.7, { align:'center', color:f.col, lw:1.5, glow: f.sz > 0.85 ? 2 : 0, alpha: f.life < 0.8 ? 1 : Math.max(0, 1 - (f.life - 0.8)/0.5) });
+    vtext(ctx, f.text, sx, sy, f.sz || 0.7, { align:'center', color:mc(f.col), lw:1.5, glow: f.sz > 0.85 ? 2 : 0, alpha: f.life < 0.8 ? 1 : Math.max(0, 1 - (f.life - 0.8)/0.5) });
   }
   if (state !== 'title'){                                // faint frame lines where the playfield ends (wide screens)
     const e0 = mapMode ? FX : toSX(0), e1 = mapMode ? W - FX : toSX(WW);
@@ -2401,7 +2419,8 @@ function drawBeam(t, S){
   ctx.globalAlpha = bf;
   const x0 = ST.x - ST.bw, y0 = ST.yb - 12, y1 = ST.yb + beamLen();
   const g = ctx.createLinearGradient(0, y0, 0, y1);
-  g.addColorStop(0, 'rgba(245,245,245,0.5)'); g.addColorStop(0.35, 'rgba(245,245,245,0.16)'); g.addColorStop(1, 'rgba(245,245,245,0)');
+  // capped at 0.3: with the bloom on top, a brighter mouth left the station's edge and the lander in it under 3:1
+  g.addColorStop(0, 'rgba(245,245,245,0.3)'); g.addColorStop(0.35, 'rgba(245,245,245,0.13)'); g.addColorStop(1, 'rgba(245,245,245,0)');
   ctx.fillStyle = g; ctx.fillRect(x0, y0, ST.bw*2, y1 - y0);
   ctx.fillStyle = C.ink;                                // motes drifting up, brighter toward the station
   for (const m of motes){ ctx.globalAlpha = bf*(0.05 + 0.9*(1 - (m.y - y0)/(y1 - y0))); const z = m.s/S; ctx.fillRect(m.x - z/2, m.y - z/2, z, z); }
@@ -2537,7 +2556,7 @@ function drawShop(t){
     ctx.fillStyle = 'rgba(5,7,12,0.6)'; ctx.fillRect(rx, y, rw, rh);   // a darker base so the field never shows through the words
     ctx.fillStyle = sel ? K.cardSelected : K.card; ctx.fillRect(rx, y, rw, rh);
     if (fl > 0){ ctx.globalAlpha = fl*0.25; ctx.fillStyle = C.coin; ctx.fillRect(rx, y, rw, rh); ctx.globalAlpha = 1; }
-    ctx.strokeStyle = fl < 0 ? C.alert : sel ? C.blue : can || max ? K.cardEdge : K.cardEdgeOff; ctx.lineWidth = sel ? 3 : 2;
+    ctx.strokeStyle = fl < 0 ? mistakeColor() : sel ? C.blue : can || max ? K.cardEdge : K.cardEdgeOff; ctx.lineWidth = sel ? 3 : 2;
     ctx.strokeRect(rx, y, rw, rh);
     ctx.restore();
     const ty = y + Math.min(rh*0.42, 26*UI);
@@ -2565,7 +2584,7 @@ function drawShop(t){
   vtext(ctx, 'STAR MAP', cx, launch.y + lh2/2 + 6*UI, 1.0*UI, { align:'center', color: lsel ? C.blue : C.ink, glow:2, lw:2 });
   let fy = launch.y + lh2 + 22*UI;
   if (!touch){ vtext(ctx, 'UP DOWN CHOOSE - ' + keyLabel('dig') + ' BUYS - ' + keyLabel('leave') + ' LEAVES', cx, fy, 0.75*UI, { align:'center', color:C.inkMuted, lw:1.4 }); fy += 20*UI; }
-  if (shopMsg) vtext(ctx, shopMsg.text, cx, fy, 0.8*UI, { align:'center', color:C.alert, lw:1.6 });
+  if (shopMsg) vtext(ctx, shopMsg.text, cx, fy, 0.8*UI, { align:'center', color:mistakeColor(), lw:1.6 });
   else if (homeNote) vtext(ctx, homeNote.text, cx, fy, 0.75*UI, { align:'center', color:C.blue, lw:1.4, alpha: homeNote.t < 3 || held('home') ? 1 : Math.max(0, (3.5 - homeNote.t)*2) });
   shopUI = { rows, launch };
 }
@@ -2739,7 +2758,7 @@ function drawCasino(t){
   ctx.fillStyle = C.faint; ctx.fillRect(rx0 - 6*f, ry + rh/2, 3*rw + 2*gap + 12*f, 1);
   // message
   const m = c.msg || (c.spinning ? '' : 'PULL THE LEVER');
-  if (m) vtext(ctx, m, cx, ry + rh + 34*f, Math.min(0.62*f, (mw - 20*f)/(m.length*12)), { align:'center', color:c.mcol, lw:1.4, glow: c.flash > 0 ? 2 : 0 });
+  if (m) vtext(ctx, m, cx, ry + rh + 34*f, Math.min(0.62*f, (mw - 20*f)/(m.length*12)), { align:'center', color:mc(c.mcol), lw:1.4, glow: c.flash > 0 ? 2 : 0 });
   // bet selector
   const by = ry + rh + 60*f, bw = 40*f, bh = 34*f;
   const minus = { x:mx + 20*f, y:by, w:bw, h:bh }, plus = { x:mx + mw - 20*f - bw, y:by, w:bw, h:bh };
@@ -2798,8 +2817,8 @@ function drawHUD(t){
   const x0 = Math.max(safe.l, FX) + 16, y0 = hudY(), xr = shell.hudRight(W, UI);
   const lowF = fuel <= LOW_FUEL, raidOn = state === 'raid';
   vtext(ctx, raidOn ? 'RIVAL RAID' : mission === 'casino' ? "R'N'R" : mission === 'rescue' ? 'RESCUE' : 'MOON ' + String(wave).padStart(2, '0'), x0, y0, h, { lw:1.8 });
-  // fuel: signal while healthy; when low the label says LOW (a cue besides colour), in alert (ink in a raid, where red is the enemy)
-  const fc = lowF ? (raidOn ? C.ink : C.alert) : C.blue;
+  // fuel: signal while healthy; when low the label says LOW (a cue besides colour), in alert (ink wherever red is the enemy)
+  const fc = lowF ? mistakeColor() : C.blue;
   vtext(ctx, (lowF ? 'LOW ' : 'FUEL ') + String(Math.ceil(fuel)).padStart(4,'0'), x0, y0 + lh, 0.85*h, { lw:1.6, color:fc });
   const barW = textW('FUEL 0000', 0.85*h), segW = (barW - gap*(segs-1)) / segs, on = Math.ceil(fuel / FUELMAX * segs);
   for (let i=0;i<segs;i++){ ctx.fillStyle = i < on ? fc : C.faint; ctx.fillRect(x0 + i*(segW + gap), y0 + lh + 6, segW, 4); }
@@ -2855,8 +2874,8 @@ function drawHUD(t){
     vtext(ctx, mission === 'rescue' ? 'SALVAGE WHAT YOU CAN - THE BEAM IS ON' : 'FLY UP TO THE TRACTOR BEAM WHEN READY', W/2, viewH*0.3 + 30, 0.8*UI, { align:'center', lw:1.5, alpha:k });
   }
   if (state === 'play'){
-    if (fuel <= 0) { if (blink(t, 3)) vtext(ctx, 'OUT OF FUEL', W/2, viewH*0.26, 0.9*UI, { align:'center', color:C.alert, glow:2, lw:1.8 }); }
-    else if (lowF && (lowT < 3 || CP.motionReduced() || (t % 1.2) < 0.8)) bigCenter('LOW FUEL', viewH*0.26, C.alert, 1.4);   // big, and keeps coming back while you're low
+    if (fuel <= 0) { if (blink(t, 3)) vtext(ctx, 'OUT OF FUEL', W/2, viewH*0.26, 0.9*UI, { align:'center', color:mistakeColor(), glow:2, lw:1.8 }); }
+    else if (lowF && (lowT < 3 || CP.motionReduced() || (t % 1.2) < 0.8)) bigCenter('LOW FUEL', viewH*0.26, mistakeColor(), 1.4);   // big, and keeps coming back while you're low
     const hint = mission === 'casino' ? (L.grounded || (cstation && cstation.visited) ? '' : 'LAND ON THE LUCKY STAR') : quotaMet() ? '' : mission === 'rescue' ? 'FLY DOWN TO THE WRECK' : 'DIG ' + quota + ' IN GEMS';
     if (hint && stateT < 0.2) resetGate('hint');
     if (hint && (stateT < (beamOn() ? 5 : 2.2) || held('hint')) && blink(stateT, 4)) vtext(ctx, hint, W/2, viewH*0.33, 0.8*UI, { align:'center', lw:1.5, color: beamOn() ? C.blue : C.ink });
@@ -2864,7 +2883,7 @@ function drawHUD(t){
 }
 function drawMessage(){
   const y = viewH*0.32;
-  bigCenter(msg, y, msgCol, 1.7);
+  bigCenter(msg, y, mc(msgCol), 1.7);
   if (msg2) vtext(ctx, msg2, W/2, y + 16 + 12*0.9, 0.9*UI, { align:'center', color: state === 'crashed' ? C.ink : state === 'docked' ? C.blue : state === 'drilled' && drill.found ? C.coin : C.ink, lw:1.8 });
 }
 function phosphor(){
@@ -2934,6 +2953,8 @@ requestAnimationFrame(frame);
 if (/[?&]test\b/.test(location.search)) window.__mm = {
   shell, get state(){ return state; }, get score(){ return score; }, get fuel(){ return fuel; }, get L(){ return L; }, get credits(){ return credits; },
   get gclock(){ return gclock; }, get pads(){ return pads; }, get drill(){ return drill; },
+  set fuel(v){ fuel = v; }, get hostile(){ return hostileOnScreen(); }, get mistakeColor(){ return mistakeColor(); },
+  moon(n){ const m = mapPos; startLevel({ level:n }); mapPos = m; },   // jump to moon n (hazards from moon 3)
   crash: r => crash(r || 'TEST'),
   go(name){
     if (name === 'shop'){ credits = 5000; openShop(); }

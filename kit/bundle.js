@@ -613,12 +613,43 @@
     if (b.hit) return;
     ctx.fillStyle = b.type === 'hard' && b.hp < b.maxHp ? COLORS.brickCracked : b.color;
     ctx.fillRect(b.x, b.y, b.w, b.h);
+    drawBrickMarks(ctx, b);
     if (b.special) {
       var mw = b.w * 0.38, mh = b.h * 0.5;
       ctx.save(); ctx.globalAlpha = 0.4; ctx.fillStyle = '#ffffff';
       ctx.fillRect(b.x + b.w / 2 - mw / 2, b.y + b.h / 2 - mh / 2, mw, mh);
       ctx.restore();
     }
+  }
+  // The points ladder is never told by colour alone: dark notches cut into the top edge, one per
+  // step (Y 1pt = 1, G 3pt = 2, O 5pt = 3, R 7pt = 4). Hard bricks add an inner frame, and a crack
+  // once hit; steel has no notches and is hatched. Marks are BRICK_MARK, at least 3:1 on every brick.
+  // Pass x, y, w, h to mark a brick drawn somewhere else (a falling brick).
+  var BRICK_MARK = 'rgba(0,0,0,0.62)';
+  function brickTier(points){ return points >= 7 ? 4 : points >= 5 ? 3 : points >= 3 ? 2 : points >= 1 ? 1 : 0; }
+  function drawBrickMarks(ctx, b, x, y, w, h){
+    x = x === undefined ? b.x : x; y = y === undefined ? b.y : y; w = w || b.w; h = h || b.h;
+    ctx.save();
+    ctx.fillStyle = BRICK_MARK; ctx.strokeStyle = BRICK_MARK;
+    if (b.type === 'indestructible') {
+      ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
+      ctx.lineWidth = 2; ctx.beginPath();
+      for (var k = -h; k < w; k += 9) { ctx.moveTo(x + k, y + h); ctx.lineTo(x + k + h, y); }
+      ctx.stroke(); ctx.restore();
+      return;
+    }
+    var tier = brickTier(b.points);
+    for (var i = 0; i < tier; i++) ctx.fillRect(Math.round(x + w * (i + 1) / (tier + 1) - 1.5), y, 3, 5);
+    if (b.type === 'hard') {
+      ctx.lineWidth = 1.5; ctx.strokeRect(x + 2.75, y + 6.75, w - 5.5, h - 9.5);
+      if (b.hp < b.maxHp) {
+        ctx.lineWidth = 2; ctx.beginPath();
+        ctx.moveTo(x + w * 0.30, y + 6); ctx.lineTo(x + w * 0.42, y + h * 0.62);
+        ctx.lineTo(x + w * 0.55, y + h * 0.5); ctx.lineTo(x + w * 0.68, y + h);
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
   }
   function drawPaddle(ctx, x, y, w, h){ ctx.fillStyle = COLORS.ink; ctx.fillRect(x, y, w || 70, h || 20); }
   function drawBall(ctx, x, y, color, size){ ctx.fillStyle = color || COLORS.ink; ctx.fillRect(x, y, size || 14, size || 14); }
@@ -628,7 +659,8 @@
     ctx.save();
     for (var col = 0; col < layout.cols; col++) {
       var x = layout.side + col * (brickW + layout.gap);
-      if (col < filled) { ctx.fillStyle = COLORS.inkFaint; ctx.fillRect(x, y, brickW, layout.brickH); }
+      // Filled slots are ink-muted (4.5:1 on every sky step), empty ones a ghost outline: told by fill and brightness.
+      if (col < filled) { ctx.fillStyle = COLORS.inkMuted; ctx.fillRect(x, y, brickW, layout.brickH); }
       else { ctx.strokeStyle = COLORS.inkGhost; ctx.lineWidth = 1; ctx.strokeRect(x + 0.5, y + 0.5, brickW - 1, layout.brickH - 1); }
     }
     ctx.restore();
@@ -1029,8 +1061,8 @@
     styles: {
       // Breakout's cabinet: dim with scrim, raw glows.
       portrait: { scrim: true, glowScale: 1, title: 2.2, head: 1.6, score: 1.1, body: 0.85, small: 0.75, gTitle: 2, gBody: 1, input: 'CLICK OR SPACE' },
-      // Asteroids' field: write straight onto space, GLOW_SCALE glows, blinking prompt.
-      wide: { scrim: false, glowScale: GLOW_SCALE, title: 3.5, head: 2.6, score: 1.3, body: 1, small: 0.75, gTitle: 9, gBody: 4, input: 'PRESS ENTER OR TAP' },
+      // Asteroids' field: dim with scrim so screen text never sits on a rock's stroke, GLOW_SCALE glows, blinking prompt.
+      wide: { scrim: true, glowScale: GLOW_SCALE, title: 3.5, head: 2.6, score: 1.3, body: 1, small: 0.75, gTitle: 9, gBody: 4, input: 'PRESS ENTER OR TAP' },
       // Code Breaker's keypad column: a deep scrim (its cards and keypad are busy), GLOW_SCALE glows.
       column: { scrim: true, scrimColor: 'rgba(0,0,0,0.86)', glowScale: GLOW_SCALE, title: 3, head: 2, score: 1.6, body: 0.85, small: 0.75, gTitle: 9, gBody: 3, input: 'PRESS ANY KEY OR TAP', resumeInput: 'PRESS P OR TAP' }
     }
@@ -1687,7 +1719,7 @@
     GHOST: GHOST, drawGhosts: drawGhosts, smoothVelocity: smoothVelocity,
     drawShip: drawShip, makeAsteroid: makeAsteroid, drawAsteroid: drawAsteroid, drawSaucer: drawSaucer, drawStation: drawStation,
     drawPickup: drawPickup, drawBullet: drawBullet, drawDrone: drawDrone, drawMissile: drawMissile,
-    BRICKS: BRICKS, WALL: WALL, parseWall: parseWall, drawBrick: drawBrick, drawPaddle: drawPaddle, drawBall: drawBall, drawCatchMeter: drawCatchMeter,
+    BRICKS: BRICKS, WALL: WALL, parseWall: parseWall, drawBrick: drawBrick, drawBrickMarks: drawBrickMarks, BRICK_MARK: BRICK_MARK, drawPaddle: drawPaddle, drawBall: drawBall, drawCatchMeter: drawCatchMeter,
     drawLifeIcons: drawLifeIcons, drawCurrency: drawCurrency, drawHud: drawHud, drawStatHud: drawStatHud, createSearchlight: createSearchlight,
     OVERLAYS: OVERLAYS, drawOverlay: drawOverlay,
     ICONS: ICONS, drawIcon: drawIcon,

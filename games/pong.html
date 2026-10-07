@@ -365,20 +365,27 @@
   resetGame();
 
   // ---- Input: drag anywhere to move, swipe up to smash ----
-  function movePlayerTo(clientX){
-    const rect = canvas.getBoundingClientRect();
-    playerX = clamp((clientX - rect.left) * W / rect.width - PADDLE_W / 2, 0, W - PADDLE_W);
+  // At 100% STEERING the paddle sits under the finger or mouse, as in the source. At any other
+  // setting the drag is relative: the paddle moves by the pointer's travel times shell.steering(),
+  // so 50% gives fine control and 200% crosses the court with a short swipe.
+  let lastPointerX = null;
+  function movePlayerTo(clientX, start){
+    const rect = canvas.getBoundingClientRect(), k = W / rect.width, steer = shell.steering();
+    if (steer === 1) playerX = (clientX - rect.left) * k - PADDLE_W / 2;
+    else if (!start && lastPointerX !== null) playerX += (clientX - lastPointerX) * k * steer;
+    lastPointerX = clientX;
+    playerX = clamp(playerX, 0, W - PADDLE_W);
   }
   canvas.addEventListener('pointerdown', (e) => {
     canvas.focus({ preventScroll: true });
     if (!shell.isPlaying()) return;
     pointerYSamples = [];
-    movePlayerTo(e.clientX);
+    movePlayerTo(e.clientX, true);
   });
   canvas.addEventListener('pointermove', (e) => {
-    if (!shell.isPlaying()) return;
+    if (!shell.isPlaying()) { lastPointerX = null; return; }
     if (e.pointerType !== 'mouse' && !(e.buttons & 1) && e.pressure === 0) return;
-    movePlayerTo(e.clientX);
+    movePlayerTo(e.clientX, false);
     trackPointerY(e.clientY);
   });
 

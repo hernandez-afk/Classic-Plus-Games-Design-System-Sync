@@ -51,12 +51,14 @@ Every game gets the Shell's shared settings: rebindable single-key controls, hel
 - **Celestipede:** autofire (no mashing). Pickups carry letters. Explosions no longer cycle colours 24 times a second. Messages STAY holds the wave banner.
 - **Moon Miner:** a crash ends the run on the result screen, and PLAY AGAIN retries the mission (the campaign is kept). Timer off makes the drill clock stop for practice. Gems, pads and decks have non-colour marks. Full-screen flashes are under 9% and off under reduced motion. S is settings, so use Down instead of S.
 
-### Known gaps
+### Closed gaps, and what still rests on a second cue
 
-- Celestipede: the blue saucer is an enemy drawn in the player's signal blue.
-- Moon Miner: alert and hostile red can share a screen on moons with saucers or lava. The bloom pass is not counted in contrast.
-- Breakout: filled catch-meter slots use the kit's decorative faint ink (under 3:1), though filled and empty slots also differ by shape.
-- Pong: drag places the paddle directly, so STEERING only affects keyboard speed.
+- Celestipede: both saucers and the queen's eyes are drawn as enemies (`hostile`, `ink`), never in the player's `signal`. Every pair of meaningful colours on screen together was measured (CIEDE2000, normal vision and three kinds of colour blindness): 25 of 28 pairs are 10 or more apart. The three closer pairs (worm body / missiles, worm head / body, minigun / missiles, 7.3 to 8.6) are told apart by shape and by the M and R letters on pickups and buff bars.
+- Moon Miner: `alert` never shares a screen with `hostile`. On a moon with saucers, volcanoes, lava, bugs or rivals, mistakes (LOW FUEL, crashes, NOT ENOUGH CREDITS) show in ink with their words and blinking. Contrast was measured with the bloom pass in rendered frames: bloom is now 0.17 / 0.22 and the raid beam's peak 0.3, so text stays 4.5:1 and objects 3:1 next to their own glow.
+- Breakout: points are notched into every brick by the kit's BrickWall, and the catch meter fills in `ink-muted`.
+- Pong: drag follows the STEERING setting (100% keeps the paddle under the finger; other settings move it by the drag times the setting).
+- Asteroids: the shell dims the field behind its screens, so PAUSED and the results never sit on a rock.
+- Celestipede on a narrow phone: when the touch-size buttons leave no room, WAVE moves left and the lives show as one tank and a count.
 
 ### Kit fixes this copy relies on
 
@@ -67,3 +69,4 @@ The kit in `kit/` includes the fixes found while porting these games (design sys
 - An untimed run keeps no best score and its result reads PRACTICE - TIMER OFF.
 - Hold actions report each press to `onAction`, so Moon Miner's menus and drill turns follow the player's own keys; `shell.releaseHolds()` stops a toggled key from flying the lander after a menu.
 - `.cp-layer` and the portrait stage size themselves; locked shop cards, the fire button and debris dust pass contrast in the kit.
+- BrickWall notches every brick by value and the catch meter fills in `ink-muted`; the wide layout's shell screens dim the field.

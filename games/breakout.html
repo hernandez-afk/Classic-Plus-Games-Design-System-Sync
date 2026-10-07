@@ -304,44 +304,10 @@ YYYYYYYY`,
   buildBricks();
 
   // ---- Second cue for the points ladder (README rule 2) ----
-  // Colour is never the only sign of a brick's value: each brick carries
-  // dark notches cut into its top edge, one per step of the ladder
-  // (Y 1pt = 1, G 3pt = 2, O 5pt = 3, R 7pt = 4). Hard bricks (5pt) add an
-  // inner frame (cracked ones a crack through it); steel has no notches
-  // and is hatched. A charged ball and its orb carry the same count as dice pips.
-  const MARK = 'rgba(0,0,0,0.62)';
+  // The kit's drawBrick cuts the notches (one per step of the ladder), the hard brick's frame and
+  // steel's hatching; a charged ball and its orb carry the same count as dice pips, in the same mark colour.
+  const MARK = CP.BRICK_MARK;
   function tierOf(points){ return points >= 7 ? 4 : points >= 5 ? 3 : points >= 3 ? 2 : points >= 1 ? 1 : 0; }
-  function drawBrickMarks(c, b, type, hp, maxHp, x, y, w, h){
-    x = x === undefined ? b.x : x; y = y === undefined ? b.y : y; w = w || b.w; h = h || b.h;
-    c.save();
-    c.fillStyle = MARK; c.strokeStyle = MARK;
-    if (type === 'indestructible') {
-      c.beginPath(); c.rect(x, y, w, h); c.clip();
-      c.lineWidth = 2;
-      c.beginPath();
-      for (let k = -h; k < w; k += 9) { c.moveTo(x + k, y + h); c.lineTo(x + k + h, y); }
-      c.stroke();
-      c.restore();
-      return;
-    }
-    const tier = tierOf(b.points);
-    for (let i = 0; i < tier; i++) {
-      const cx = x + w * (i + 1) / (tier + 1);
-      c.fillRect(Math.round(cx - 1.5), y, 3, 5);
-    }
-    if (type === 'hard') {
-      c.lineWidth = 1.5;
-      c.strokeRect(x + 2.75, y + 6.75, w - 5.5, h - 9.5);
-      if (hp < maxHp) {
-        c.lineWidth = 2;
-        c.beginPath();
-        c.moveTo(x + w * 0.30, y + 6); c.lineTo(x + w * 0.42, y + h * 0.62);
-        c.lineTo(x + w * 0.55, y + h * 0.5); c.lineTo(x + w * 0.68, y + h);
-        c.stroke();
-      }
-    }
-    c.restore();
-  }
   // Dice pips on a 14px square (orb, charged ball).
   const PIP_LAYOUT = { 1: [[1,1]], 2: [[0,0],[2,2]], 3: [[0,0],[1,1],[2,2]], 4: [[0,0],[2,0],[0,2],[2,2]] };
   function drawPips(c, x, y, s, tier){
@@ -665,7 +631,7 @@ YYYYYYYY`,
     for (const fb of fallingBricks) {
       ctx.fillStyle = fb.color;
       ctx.fillRect(fb.x, fb.y, fb.w, fb.h);
-      drawBrickMarks(ctx, fb, fb.type, fb.hp, fb.maxHp);
+      CP.drawBrickMarks(ctx, fb);
     }
   }
 
@@ -1044,7 +1010,6 @@ YYYYYYYY`,
     for (const b of bricks) {
       if (b.hit || b.pendingExplode) continue;
       CP.drawBrick(ctx, b);
-      drawBrickMarks(ctx, b, b.type, b.hp, b.maxHp);
     }
     // pending-explosion bricks fade to white (and, with full motion, grow) before they go
     const still = CP.motionReduced();

@@ -470,7 +470,7 @@ function drawBossSeg(s, x, y, head, sc, ang){
     ctx.moveTo(R*0.75, -R*0.5);
     for (let k=0;k<=6;k++) ctx.lineTo(k%2 ? R*1.05+bite : R*0.75, -R*0.5 + k*R/6);
     ctx.stroke();
-    const blink = Math.sin(time*2.3) > 0.95; ctx.fillStyle = C.blue; const e = Math.max(2.5, R*0.2);
+    const blink = Math.sin(time*2.3) > 0.95; ctx.fillStyle = C.ink; const e = Math.max(2.5, R*0.2);   // eyes in ink like the worm heads: signal is the player's side
     for (const ey of [-0.5, 0, 0.5]) ctx.fillRect(R*0.3 - e/2, ey*R - (blink?1:e/2), e, blink?2:e);
   }
   ctx.restore();
@@ -755,7 +755,7 @@ function killSaucer(pts){
     addScore(p); popup(saucer.x, saucer.y-cell*0.6, p, C.red); burst(saucer.x, saucer.y, C.red, 30, cell*10, 0, 1.6, 0.95);
     noise(0.45, 0.22, 2400); saucer=null; saucerT=saucerGap(); return;
   }
-  addScore(pts); popup(saucer.x, saucer.y-cell*0.6, pts, C.blue); burst(saucer.x, saucer.y, C.blue, 26, cell*8, 0);
+  addScore(pts); popup(saucer.x, saucer.y-cell*0.6, pts); burst(saucer.x, saucer.y, C.red, 26, cell*8, 0);
   noise(0.4,0.2,1800);
   const type = pendingDrop || unlocked[Math.floor(Math.random()*unlocked.length)]; pendingDrop = null;
   pickups.push({ x: Math.max(fieldLeft+cell, Math.min(fieldRight-cell, saucer.x)), y:saucer.y, type, life:6 });
@@ -980,7 +980,7 @@ function update(dt){
   // saucer (the spider)
   if (!saucer){ saucerT-=dt;
     if (saucerT<=0 && bannerT<=0){ const L = Math.random()<0.5;
-      const red = Math.random() < (boss ? 0.75 : 0.4);                 // red raiders: a little rarer than the blue ones
+      const red = Math.random() < (boss ? 0.75 : 0.4);                 // raiders (spiked): a little rarer than the pickup saucers
       const sp = cell*(1.4 + tier()*0.25 + cyc()*0.05) * (red ? 1.6 : 1);
       saucer = { x: L?fieldLeft-cell:fieldRight+cell, y: cy(zoneTop-2), vx:(L?1:-1)*sp, vy:cell*3.5, turn:0.4, red, sp, age:0 }; } }
   else {
@@ -1105,7 +1105,7 @@ function drawTank(x, y, alpha){
   ctx.restore();
 }
 function drawSaucer(s){
-  const S = cell*0.85; ctx.save(); ctx.translate(s.x,s.y); ctx.strokeStyle = s.red ? C.red : C.blue; ctx.lineWidth=2;
+  const S = cell*0.85; ctx.save(); ctx.translate(s.x,s.y); ctx.strokeStyle = C.red; ctx.lineWidth=2;   // both saucers are enemies: hostile; the raider is told apart by its spikes and eye
   if (s.red){                                         // raider: jagged underside spikes and a flickering eye
     // spikes sit on the hull's bottom edge (which runs from -0.45 to +0.45); the outer two grow from its corner vertices
     ctx.beginPath();
@@ -1262,13 +1262,21 @@ function drawHudRow(){
   const lx = fieldLeft, ly = 20*ui, vy = 44*ui, ls = 0.75*ui, vs = 1.25*ui;
   const label = (t, x, al) => vtext(ctx, t, x, ly, ls, { color: K.inkMuted, align: al, lw: 1.2 });
   label('SCORE', lx, 'left'); vtext(ctx, String(score).padStart(6,'0'), lx, vy, vs, { align:'left', lw: 2, glow: 2 });
-  const wx = lx + 118*ui;
-  label('WAVE', wx, 'left'); vtext(ctx, String(wave).padStart(2,'0'), wx, vy, vs, { align:'left', lw: 2, glow: 2 });
   const right = shell.hudRight(W, ui);
+  // On a narrow screen (the touch buttons take more room) the lives row would run into WAVE:
+  // WAVE moves left as far as the score allows, then the lives show as one tank and a count.
+  const c = 11*ui, w = c*0.8, pitch = 20*ui, gapX = 14*ui, waveW = CP.inkWidth('00', vs);
+  const scoreEnd = lx + CP.inkWidth('000000', vs);
+  const livesW = k => k > 0 ? 2*w + (k - 1)*pitch : 0;
+  let n = Math.max(0, Math.min(lives, 6)), count = false;
+  let wx = Math.min(lx + 118*ui, right - livesW(n) - gapX - waveW);
+  if (wx < scoreEnd + gapX) { wx = Math.min(lx + 118*ui, Math.max(scoreEnd + gapX, right - livesW(1) - CP.inkWidth('X6', vs) - 4*ui - gapX - waveW)); count = n > 1; }
+  label('WAVE', wx, 'left'); vtext(ctx, String(wave).padStart(2,'0'), wx, vy, vs, { align:'left', lw: 2, glow: 2 });
   label('LIVES', right, 'right');
-  const n = Math.max(0, Math.min(lives, 6)), c = 11*ui, w = c*0.8, pitch = 20*ui;
+  let tankRight = right;
+  if (count) { vtext(ctx, 'X' + n, right, vy, vs, { align:'right', lw: 2, glow: 2 }); tankRight = right - CP.inkWidth('X' + n, vs) - 4*ui; n = 1; }
   ctx.save(); ctx.strokeStyle=C.ink; ctx.lineWidth=1.5*ui; ctx.lineJoin='miter';
-  for (let i=0;i<n;i++){ const x = right - w - i*pitch, y = vy - 6*ui;   // tiny tanks: the player's own avatar
+  for (let i=0;i<n;i++){ const x = tankRight - w - i*pitch, y = vy - 6*ui;   // tiny tanks: the player's own avatar
     poly([[x-w,y+c*0.44],[x+w,y+c*0.44],[x+w,y+c*0.08],[x+w*0.85,y+c*0.08],[x+w*0.55,y-c*0.22],[x+w*0.3,y-c*0.22],
       [x+w*0.3,y-c*0.44],[x-w*0.3,y-c*0.44],[x-w*0.3,y-c*0.22],[x-w*0.55,y-c*0.22],[x-w*0.85,y+c*0.08],[x-w,y+c*0.08]]);
     ctx.beginPath(); ctx.moveTo(x,y-c*0.44); ctx.lineTo(x,y-c*0.8); ctx.stroke(); }
