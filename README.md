@@ -58,15 +58,12 @@ Every game gets the Shell's shared settings: rebindable single-key controls, hel
 - Breakout: filled catch-meter slots use the kit's decorative faint ink (under 3:1), though filled and empty slots also differ by shape.
 - Pong: drag places the paddle directly, so STEERING only affects keyboard speed.
 
-### Kit bugs worked around in the games
+### Kit fixes this copy relies on
 
-To be fixed in the design system repo, not here:
+The kit in `kit/` includes the fixes found while porting these games (design system commit in `kit/VERSION`), so the games no longer carry their own workarounds:
 
-- `.cp-layer` has no width or height, so the HUD layer renders at double size on high-DPI phones (Breakout, Pong).
-- `.cp-stage-portrait` squashes the 420:640 canvas on short windows (Pong).
-- The Shell's settings, pause and sound hit boxes overlap on small screens, so a tap on pause can mute (Asteroids).
-- `drawFireButton` idle stroke is 1.7:1 and `drawShopCard` locked text is about 2.5:1, both under the contrast rules (Asteroids).
-- The PixelBurst `debris` preset fades dust under 3:1.
-- With TIMER OFF the Shell still saves a best score (Moon Miner).
-- The intro fade follows only the device's reduced-motion setting, not SETTINGS > MOTION.
-- The Shell's live region isn't exposed, so each game adds its own for its events.
+- HUD settings, pause and sound buttons spread to 44 CSS px on touch screens instead of overlapping. Celestipede and Moon Miner place the row on their own HUD and apply the same rule.
+- Each game says its own events through `shell.say`; there is one live region per page.
+- An untimed run keeps no best score and its result reads PRACTICE - TIMER OFF.
+- Hold actions report each press to `onAction`, so Moon Miner's menus and drill turns follow the player's own keys; `shell.releaseHolds()` stops a toggled key from flying the lander after a menu.
+- `.cp-layer` and the portrait stage size themselves; locked shop cards, the fire button and debris dust pass contrast in the kit.

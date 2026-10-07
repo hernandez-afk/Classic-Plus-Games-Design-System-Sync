@@ -9,14 +9,12 @@
 <style>
   html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; overscroll-behavior: none; background: var(--void); }
   #game { outline: none; touch-action: none; -webkit-tap-highlight-color: transparent; }
-  .cp-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 </style>
 </head>
 <body>
 <div id="wrap" class="cp-stage-wide">
   <canvas id="game" class="cp-canvas-wide" aria-label="Asteroids: arcade game field"></canvas>
 </div>
-<div id="say" class="cp-sr" role="status" aria-live="polite"></div>
 <script src="../kit/bundle.js"></script>
 <script>
 (function() {
@@ -27,9 +25,8 @@
   const CP = window.ClassicPlus;
   const COLORS = CP.COLORS;
   const canvas = document.getElementById('game');
-  const sayEl = document.getElementById('say');
-  // The shell announces start, pause and the result; the game says its own events here.
-  function say(text) { sayEl.textContent = ''; sayEl.textContent = text; }
+  // The shell announces start, pause and the result; the game says its own events through the same live region.
+  function say(text) { if (shell) shell.say(text); }
   function pad2(n) { return String(n).padStart(2, '0'); }
   let shell = null; // created at the bottom, once every function exists
 
@@ -2121,11 +2118,6 @@
     return { name, desc: u.describe(u), cost, lockLabel, icon: u.icon };
   }
 
-  // The kit card fades a locked card to 30%, which drops its text under
-  // 4.5:1; this fade lifts locked cards to 80% (name, lock label and
-  // description all pass) while unlocked cards fade in normally.
-  const LOCKED_CARD_ALPHA = 0.8;
-
   function drawShopUI() {
     const a = stationShopFadeT;
     if (a <= 0.01) return;
@@ -2160,11 +2152,7 @@
     const pageItems = currentPageUpgrades();
     shopCardRects().forEach((card, i) => {
       const v = upgradeView(card.upgrade);
-      const locked = v.cost === null;
-      CP.drawShopCard(ctx, card, v, {
-        currency, selected: i === stationSelectedCard, uiScale: UI_SCALE,
-        fade: locked ? a * LOCKED_CARD_ALPHA / 0.3 : a
-      });
+      CP.drawShopCard(ctx, card, v, { currency, selected: i === stationSelectedCard, uiScale: UI_SCALE, fade: a });
     });
 
     // page arrows + indicator
@@ -2444,30 +2432,6 @@
     ship.invincible = 60;
   }
 
-  // HUD buttons (settings, pause, sound). The same spots as the kit's default
-  // layout; on touch screens the glyphs spread so that each hit box is a full
-  // 44 CSS px of its own. (The kit grows each box about its own centre, and
-  // at small uiScale the grown boxes overlap, so tapping pause hit sound.)
-  function hudButtons(W, H, ui) {
-    const K = CP.SHELL, bar = K.bars.wide;
-    const cap = bar.cap * ui, g = K.buttonGap * ui, cy = bar.cy * ui, b = K.button * ui;
-    const sR = W - bar.edge * ui, sL = sR - 1.25 * cap, pR = sL - g, pL = pR - 0.75 * cap, gR = pL - g, gL = gR - cap;
-    let sc = (sL + sR) / 2, pc = (pL + pR) / 2, gc = (gL + gR) / 2;
-    const min = isTouchDevice ? 44 / cssScale() : 0;
-    if (!min || (sc - pc >= min && pc - gc >= min)) {
-      const m1 = (pR + sL) / 2, m2 = (gR + pL) / 2, y = cy - b / 2;
-      return {
-        mute: { x: m1, y, w: sR + K.inset * ui - m1, h: b, cx: sc, cy },
-        pause: { x: m2, y, w: m1 - m2, h: b, cx: pc, cy },
-        settings: { x: m2 - b, y, w: b, h: b, cx: gc, cy }
-      };
-    }
-    const h = Math.max(b, min);
-    sc = Math.min(sc, W - min / 2); pc = sc - min; gc = pc - min;
-    const box = (cx) => ({ x: cx - min / 2, y: cy - h / 2, w: min, h, cx, cy });
-    return { mute: box(sc), pause: box(pc), settings: box(gc) };
-  }
-
   // ---------- Shell: the frame around the game ----------
   const sky = CP.createHueSky(); // space-hue-start, +60 every three waves
   let stepAcc = 0;
@@ -2488,7 +2452,6 @@
     ],
     onAction: (id) => { if (id === 'hyper') hyperspace(); },
     steering: true,
-    buttons: hudButtons,
     synth: syn,
     intro: true,
     onStart: () => {

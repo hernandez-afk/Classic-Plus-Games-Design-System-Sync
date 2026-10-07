@@ -24,7 +24,6 @@
   canvas#c { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; outline: none; }
   #vignette { position: absolute; inset: 0; pointer-events: none;
     background: radial-gradient(ellipse at center, rgba(0,0,0,0) 50%, rgba(0,0,0,0.6) 100%); }
-  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 </style>
 <script src="../kit/bundle.js"></script>
 </head>
@@ -33,7 +32,6 @@
   <canvas id="c" tabindex="0" aria-label="Celestipede game field"></canvas>
   <div id="vignette"></div>
 </div></div>
-<div id="say" class="sr-only" role="status" aria-live="polite"></div>
 <script>
 (function(){
 'use strict';
@@ -49,7 +47,8 @@ function vtext(c, str, x, y, size, o){
   CP.drawVectorText(c, str, x, y, size, { color: o.color || C.ink, align: o.align || 'left', glow: o.glow || 0, lineWidth: o.lw || 2, glowScale: 1 });
   c.restore();
 }
-const say = (() => { const el = document.getElementById('say'); return t => { el.textContent = ''; el.textContent = t; }; })();
+// The game's own events go through the shell's live region.
+const say = t => { if (shell) shell.say(t); };
 const reduced = () => CP.motionReduced();
 
 /* ---------- Game-time timers (pause freezes them) ---------- */
@@ -1281,13 +1280,17 @@ function drawHudRow(){
 try { const old = parseInt(localStorage.getItem('spaceworm-hi')||'0',10);
   if (old > 0 && localStorage.getItem('classicplus:cp-celestipede:best') == null) localStorage.setItem('classicplus:cp-celestipede:best', JSON.stringify(old)); } catch(e){}
 // Settings, pause and sound end the HUD row at the field's right edge (the field is the column).
+// The kit's row, ending at the field's right edge instead of the 460px column's. On a touch
+// screen the glyphs spread, as the kit's own row does, so each hit box is 44 CSS px.
+const coarse = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
 function hudButtons(W_, H_, u){
-  const SH = CP.SHELL, bar = SH.bars.column, cap = bar.cap*u, g = SH.buttonGap*u, b = SH.button*u, cyb = bar.cy*u;
+  const SH = CP.SHELL, bar = SH.bars.column, cap = bar.cap*u, b = SH.button*u, cyb = bar.cy*u;
+  const touch = (coarse || touchMode) ? SH.minTouchCss : 0, g = Math.max(SH.buttonGap*u, touch - 0.75*cap);
   const sR = Math.min(W_ - 14*u, fieldRight), sL = sR - 1.25*cap, pR = sL - g, pL = pR - 0.75*cap, gR = pL - g, gL = gR - cap;
-  const y = cyb - b/2, m1 = (pR + sL)/2, m2 = (gR + pL)/2, sx = gL - 6*u;
-  return { mute: { x:m1, y, w: sR + SH.inset*u - m1, h:b, cx:(sL+sR)/2, cy:cyb },
+  const y = cyb - b/2, m1 = (pR + sL)/2, m2 = (gR + pL)/2, gw = Math.max(b, touch);
+  return { mute: { x:m1, y, w: Math.max(sR + SH.inset*u - m1, touch), h:b, cx:(sL+sR)/2, cy:cyb },
     pause: { x:m2, y, w:m1-m2, h:b, cx:(pL+pR)/2, cy:cyb },
-    settings: { x:sx, y, w:m2-sx, h:b, cx:(gL+gR)/2, cy:cyb } };
+    settings: { x:m2-gw, y, w:gw, h:b, cx:(gL+gR)/2, cy:cyb } };
 }
 shell = CP.createShell({
   id: 'cp-celestipede', canvas: cv, layout: 'column', title: 'CELESTIPEDE',

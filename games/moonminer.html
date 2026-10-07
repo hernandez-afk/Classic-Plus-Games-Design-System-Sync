@@ -18,14 +18,12 @@
   @media (prefers-reduced-motion: reduce) { #vig { transition:none; } }
   #safe { position:fixed; top:0; left:0; visibility:hidden; pointer-events:none;
     padding:env(safe-area-inset-top,0px) env(safe-area-inset-right,0px) env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px); }
-  .sr-only { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; }
 </style>
 </head>
 <body>
 <canvas id="c" aria-label="Moon Miner playfield"></canvas>
 <div id="vig"></div>
 <div id="safe"></div>
-<div id="gameLive" class="sr-only" role="status" aria-live="polite"></div>
 <script src="../kit/bundle.js"></script>
 <script>
 (function(){
@@ -72,8 +70,8 @@ let shx = 0, shy = 0, lastFlashT = -9;
 // full-field flashes: at most one every 0.34s, drawn under 10% alpha and fading; none under reduced motion
 function setFlash(v){ if (CP.motionReduced() || gclock - lastFlashT < 0.34) return; lastFlashT = gclock; flash = Math.max(flash, v); }
 // screen-reader announcements for the game's own events (the shell announces start, pause, sound and results)
-let lastSay = '';
-function say(text){ if (!liveEl || !text) return; liveEl.textContent = ''; lastSay = text; setTimeout(() => { if (lastSay === text) liveEl.textContent = text; }, 30); }
+// The game's own events go through the shell's live region.
+function say(text){ if (shell && text) shell.say(text); }
 // MESSAGES: STAY. A timed message asks gate(id) once its own timer has run out; under STAY the gate stays
 // shut until the player's next key or tap, otherwise it opens at once. resetGate(id) re-arms it.
 const gates = {};
@@ -85,11 +83,6 @@ function gate(id){
 const held = id => !gate(id);
 const resetGate = id => { delete gates[id]; };
 const waiting = id => !!(gates[id] && !gates[id].done);
-// timer OFF is practice: put the best score back the way it was
-function keepBest(prev){
-  shell.best = prev; shell.newBest = false;
-  try { localStorage.setItem('classicplus:cp-moonminer:best', JSON.stringify(prev)); } catch(e){}
-}
 // gems: the colour ladder (yellow 10, green 20, orange 40, red 80) plus a second cue in the marks inside:
 // none, a dot, a bar, an inner diamond
 const GEM_RANK = { yellow:0, green:1, orange:2, red:3 };
@@ -113,7 +106,7 @@ const rnd = (a,b) => a + Math.random()*(b-a);
 
 // ---------- canvas & layout ----------
 const cv = document.getElementById('c'), ctx = cv.getContext('2d');
-const probe = document.getElementById('safe'), vig = document.getElementById('vig'), liveEl = document.getElementById('gameLive');
+const probe = document.getElementById('safe'), vig = document.getElementById('vig');
 const GL = [0,1,2].map(() => { const c = document.createElement('canvas'); return { c, x:c.getContext('2d') }; });
 const WH = 900, FIELD_W = 470;                          // world size in units: a portrait playfield
 let FX = 0, fieldL = 0, fieldR = 0;                     // playfield edges on screen this frame                // world height in units
@@ -1624,9 +1617,7 @@ function endRound(){
   // crashed or failed: the run ends on the shell's result screen; PLAY AGAIN retries this mission
   const e = endInfo || { title:'CRASHED', lines:[msg, placeLine()] }; endInfo = null;
   shell.setScore(Math.floor(score));
-  const prevBest = shell.best, practice = !shell.timerOn();
-  shell.lose({ title:e.title, lines: practice ? [e.lines[0], 'PRACTICE - TIMER OFF'] : e.lines });
-  if (practice) keepBest(prevBest);                     // timer off is practice: no best score
+  shell.lose({ title:e.title, lines:e.lines });         // timer off is practice: the shell keeps no best and says so
 }
 function placeLine(){                                   // a count-style fact line for the result screen
   if (mission === 'rescue' && rescue) return 'RESCUE - ' + rescue.saved + ' OF ' + rescue.total + ' SAVED';
@@ -1834,29 +1825,18 @@ const ACTIONS = [
   { id:'leave', label:'LEAVE SHOP OR CASINO', keys:['l'] },
   { id:'newgame', label:'NEW CAMPAIGN ON MAP', keys:['n'] }
 ];
-const HOLD_IDS = ['left', 'right', 'up', 'down', 'dig'];
 const tb = { left:false, right:false, thrust:false, turnAmt:0 };   // touch: the drag pad and the THRUST / DRILL button
 let shell = null, pressQ = [], lastInputT = -1, gclock = 0;
-const ignoreHold = {};                                   // a tap-on hold left on from a menu doesn't fly the lander
-function armHolds(){ HOLD_IDS.forEach(id => { ignoreHold[id] = !!(shell && shell.isDown(id)); }); }
-const hd = id => shell.isDown(id) && !ignoreHold[id];
+// A tap-on hold left on from a menu doesn't fly the lander: let go of every hold when flight starts.
+function armHolds(){ if (shell) shell.releaseHolds(); }
+const hd = id => shell.isDown(id);
 const holdLeft = () => hd('left') || tb.left, holdRight = () => hd('right') || tb.right;
 const holdThrust = () => hd('up') || hd('dig') || tb.thrust, holdDig = () => hd('dig') || tb.thrust;
 const keyLabel = id => shell ? shell.keyFor(id) : '';
-// Which keys an action has now: the shell keeps the player's bindings under classicplus:cp-moonminer:keys
-// (rebinding swaps keys between actions); with storage blocked, the action's first key from shell.keyFor.
-function boundTo(id, key){
-  let saved = null; try { saved = JSON.parse(localStorage.getItem('classicplus:cp-moonminer:keys') || 'null'); } catch(e){}
-  const list = saved && saved[id] && saved[id].length ? saved[id] : (ACTIONS.find(a => a.id === id) || {}).keys || [];
-  return list.indexOf(key) >= 0 || CP.keyName(key) === shell.keyFor(id);
-}
-// Registered before the shell, so it sees every key first (the shell then routes it to the action).
+// Every action, hold or press, reaches onAction once per press with the player's own keys.
+// This listener only notes that a key came in (MESSAGES STAY waits for any input); it runs before the shell's.
 window.addEventListener('keydown', e => {
-  if (!shell || !shell.isPlaying() || e.ctrlKey || e.metaKey || e.altKey) return;
-  lastInputT = gclock;
-  if (e.repeat) return;
-  const key = (e.key || '').toLowerCase();
-  HOLD_IDS.forEach(id => { if (boundTo(id, key)) pressQ.push(id); });
+  if (shell && shell.isPlaying() && !e.ctrlKey && !e.metaKey && !e.altKey) lastInputT = gclock;
 }, true);
 
 function handlePress(id){                                // one press of an action, in game time
@@ -2002,7 +1982,6 @@ let newConfirm = 0;
 // ---------- update ----------
 function update(dt){
   gclock += dt;
-  HOLD_IDS.forEach(id => { if (!shell.isDown(id)) ignoreHold[id] = false; });
   const q = pressQ; pressQ = []; q.forEach(handlePress);
   if (state === 'shop'){ shopT += dt; for (const k in shopFlash) shopFlash[k] = shopFlash[k] > 0 ? Math.max(0, shopFlash[k] - dt*2.4) : Math.min(0, shopFlash[k] + dt*2.4);
     if (homeNote){ homeNote.t += dt; if (homeNote.t > 3.5 && gate('home')) homeNote = null; }
@@ -2804,12 +2783,14 @@ function bigCenter(s, y, col, maxSize){
 const hudY = () => safe.t + 30*UI;                       // baseline of the HUD's first row
 const colR = () => Math.min(W - safe.r, W - FX);         // right edge of the playfield column
 function hudButtons(W_, H_, ui){                         // the shell's own row layout, moved onto this HUD's row
-  const cap = 12*1.25*ui, g = 12*ui, sR = colR() - 14*ui, sL = sR - 1.25*cap, pR = sL - g, pL = pR - 0.75*cap, gR = pL - g, gL = gR - cap;
-  const cy = hudY() - 6.6*ui, b = 40*ui, y = cy - b/2, m1 = (pR + sL)/2, m2 = (gR + pL)/2;
+  // On a touch screen the glyphs spread, as the kit's own row does, so each hit box is 44 CSS px.
+  const SH = CP.SHELL, cap = SH.bars.column.cap*ui, t = touch ? SH.minTouchCss : 0, g = Math.max(SH.buttonGap*ui, t - 0.75*cap);
+  const sR = colR() - 14*ui, sL = sR - 1.25*cap, pR = sL - g, pL = pR - 0.75*cap, gR = pL - g, gL = gR - cap;
+  const cy = hudY() - 6.6*ui, b = SH.button*ui, y = cy - b/2, m1 = (pR + sL)/2, m2 = (gR + pL)/2, gw = Math.max(b, t);
   return {
-    mute: { x:m1, y, w:sR + 8*ui - m1, h:b, cx:(sL + sR)/2, cy },
+    mute: { x:m1, y, w:Math.max(sR + SH.inset*ui - m1, t), h:b, cx:(sL + sR)/2, cy },
     pause: { x:m2, y, w:m1 - m2, h:b, cx:(pL + pR)/2, cy },
-    settings: { x:gL - 8*ui, y, w:m2 - (gL - 8*ui), h:b, cx:(gL + gR)/2, cy }
+    settings: { x:m2 - gw, y, w:gw, h:b, cx:(gL + gR)/2, cy }
   };
 }
 function drawHUD(t){

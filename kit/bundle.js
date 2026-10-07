@@ -240,9 +240,12 @@
     function dismiss(){
       if (dismissed) return;
       dismissed = true;
-      el.style.opacity = '0';
       el.style.pointerEvents = 'none';
-      setTimeout(function(){ el.style.display = 'none'; if (opts.onDismiss) opts.onDismiss(); }, 500);
+      // The game gets input back at once; the fade is only the card leaving. Reduced motion skips it.
+      if (opts.onDismiss) opts.onDismiss();
+      if (motion.reduced) { el.className += ' cp-intro--still'; el.style.display = 'none'; return; }
+      el.style.opacity = '0';
+      setTimeout(function(){ el.style.display = 'none'; }, 500);
     }
     el.addEventListener('click', dismiss);
     el.addEventListener('touchstart', dismiss, { passive: true });
@@ -363,6 +366,8 @@
     debris: { count: 16, speedMin: 1, speedMax: 4.5, lifeMin: 360, lifeMax: 700, sizeMin: 1, sizeMax: 3,
       friction: 0.96, gravity: 0, color: COLORS.dust, glow: 4, max: 500 }
   };
+  // Debris chips are gameplay matter (dust): they never fade below this, so they keep 3:1 on every space ground.
+  var BURST_DEBRIS_MIN_ALPHA = 0.75;
   function createPixelBurst(preset, overrides){
     var p = {}, base = BURST_PRESETS[preset] || BURST_PRESETS.crumble, k;
     for (k in base) p[k] = base[k];
@@ -414,7 +419,7 @@
         for (var i = 0; i < sys.list.length; i++) {
           var d = sys.list[i], t = d.life / d.maxLife;
           var size = Math.max(1, Math.round(d.size * (0.5 + t * 0.5)));
-          ctx.globalAlpha = 0.35 + t * 0.65;
+          ctx.globalAlpha = BURST_DEBRIS_MIN_ALPHA + t * (1 - BURST_DEBRIS_MIN_ALPHA);
           ctx.fillStyle = d.color;
           ctx.fillRect(Math.round(d.x - size / 2), Math.round(d.y - size / 2), size, size);
         }
@@ -805,7 +810,7 @@
   }
 
   // ---------- ShopCard ----------
-  var SHOP = { cardW: 190, cardH: 180, gapX: 36, gapY: 28, leaveGap: 30, leaveW: 180, leaveH: 46 };
+  var SHOP = { cardW: 190, cardH: 180, gapX: 36, gapY: 28, leaveGap: 30, leaveW: 180, leaveH: 46, lockedAlpha: 0.3 };
   function shopLayout(W, H, ui){
     ui = ui || 1;
     var cw = SHOP.cardW * ui, ch = SHOP.cardH * ui, gx = SHOP.gapX * ui, gy = SHOP.gapY * ui;
@@ -826,7 +831,8 @@
     var affordable = !locked && (opts.currency || 0) >= u.cost;
     var selected = !!opts.selected;
     ctx.save();
-    ctx.globalAlpha = fade * (locked ? 0.3 : 1);
+    // Locked dims the frame and icon to opacity-locked; its words stay at full strength so they read at 4.5:1.
+    ctx.globalAlpha = fade * (locked ? SHOP.lockedAlpha : 1);
     framedRect(ctx, card, selected, COLORS.card);
     ctx.strokeStyle = selected ? COLORS.signal : (affordable ? COLORS.cardEdge : COLORS.cardEdgeOff);
     ctx.lineWidth = selected ? 3 : 2;
@@ -835,7 +841,8 @@
     ctx.strokeRect(card.x, card.y, card.w, card.h);
     ctx.shadowBlur = 0;
     if (u.icon && ICONS[u.icon]) drawIcon(ctx, u.icon, card.x + card.w / 2, card.y + 58 * ui, 70 * ui, { uiScale: ui });
-    drawVectorText(ctx, u.name, card.x + card.w / 2, card.y + 112 * ui, 0.85 * ui, { align: 'center', glow: 3, uiScale: ui });
+    ctx.globalAlpha = fade;
+    drawVectorText(ctx, u.name, card.x + card.w / 2, card.y + 112 * ui, 0.85 * ui, { align: 'center', color: locked ? COLORS.inkMuted : COLORS.ink, glow: locked ? 0 : 3, uiScale: ui });
     // Descriptions sit at the 0.75 text floor and wrap to the card (three rows fit above the lock label).
     if (u.desc) wrapVectorText(u.desc, 0.75 * ui, card.w - 16 * ui).slice(0, 3).forEach(function(row, i){
       drawVectorText(ctx, row, card.x + card.w / 2, card.y + (126 + i * 13) * ui, 0.75 * ui, { align: 'center', color: COLORS.inkMuted, uiScale: ui });
@@ -884,10 +891,12 @@
     var radius = 56 * ui, margin = 26 * ui;
     return { cx: margin + radius, cy: H - margin - radius, radius: radius };
   }
+  // Idle at 50% white: 4.8:1 on the space grounds, so the button is findable before it is pressed (3:1 for controls).
+  var FIRE_IDLE = 'rgba(255,255,255,0.5)';
   function drawFireButton(ctx, g, active, ui){
     ui = ui || 1;
     ctx.save();
-    ctx.strokeStyle = active ? 'rgba(255,255,255,0.85)' : 'rgba(255,255,255,0.18)';
+    ctx.strokeStyle = active ? 'rgba(255,255,255,0.85)' : FIRE_IDLE;
     ctx.shadowColor = 'rgba(255,255,255,0.9)';
     ctx.shadowBlur = (active ? 10 : 0) * ui * GLOW_SCALE;
     ctx.lineWidth = 2 * ui;
@@ -1097,7 +1106,7 @@
     var store = shellStore(opts.id || 'game'), shared = shellStore('all');
     var guardMs = opts.restartGuardMs === undefined ? SHELL.restartGuardMs : opts.restartGuardMs;
     var digits = opts.scoreDigits === undefined ? 6 : opts.scoreDigits;
-    var last = null, endedAt = 0, helpFrom = 'title', startAfterHelp = false, view = { W: 0, H: 0, ui: 1 }, introUp = false, live = null;
+    var last = null, endedAt = 0, practice = false, helpFrom = 'title', startAfterHelp = false, view = { W: 0, H: 0, ui: 1 }, introUp = false, live = null;
     var k;
 
     // ---- actions: the shell's own, then the game's ----
@@ -1132,6 +1141,7 @@
       score: 0,
       best: store.get('best', 0),
       newBest: false,
+      practice: false,           // the last run went untimed (TIMER OFF), so it kept no best score
       muted: !!store.get('muted', false),
       time: 0,                   // game seconds; frozen whenever the state is not 'playing'
       result: null,              // what the game passed to win() / lose()
@@ -1163,6 +1173,10 @@
     var down = {};
     shell.isDown = function(id){ return shell.state === 'playing' && !!down[id]; };
     function clearHolds(all){ for (var id in down) if (all || settings.holds !== 'toggle') down[id] = false; }
+    // Let go of every held or toggled action, e.g. when the game opens its own menu mid-play.
+    shell.releaseHolds = function(){ clearHolds(true); return shell; };
+    // The game's own events (level up, life lost) through the shell's polite live region.
+    shell.say = function(text){ announce(text); return shell; };
     function press(a, e){
       if (a.hold) {
         if (settings.holds === 'toggle') {
@@ -1171,6 +1185,8 @@
           if (on && a.group) actions.forEach(function(b){ if (b.group === a.group) down[b.id] = false; });
           down[a.id] = on;
         } else down[a.id] = true;
+        // A hold also reports each fresh press, so a game's menus and grid moves can use the player's keys.
+        if (!e.repeat && opts.onAction) opts.onAction(a.id, shell);
         return;
       }
       if (!e.repeat && opts.onAction) opts.onAction(a.id, shell);
@@ -1182,6 +1198,7 @@
         startAfterHelp = true; shell.showHowTo(); return shell;
       }
       shell.score = 0; shell.time = 0; shell.result = null; shell.newBest = false;
+      practice = !shell.timerOn();   // a run that starts, or ever goes, untimed keeps no best score
       clearHolds(true); set('playing'); unlock();
       emit('Start');
       announce('Go.');
@@ -1205,11 +1222,12 @@
       result = result || {};
       if (result.score !== undefined) shell.score = result.score;
       shell.result = result;
-      shell.newBest = shell.score > 0 && shell.score > shell.best;
+      shell.practice = practice;
+      shell.newBest = !practice && shell.score > 0 && shell.score > shell.best;
       if (shell.newBest) { shell.best = shell.score; store.set('best', shell.best); }
       endedAt = Date.now(); clearHolds(true);
       set(state); emit('End', result);
-      announce(result.say || ((result.title ? shellPlain(result.title) : (state === 'won' ? 'All clear' : 'Game over')) + '. Score ' + shell.score + '. ' + (shell.newBest ? 'New best.' : 'Best ' + shell.best + '.')));
+      announce(result.say || ((result.title ? shellPlain(result.title) : (state === 'won' ? 'All clear' : 'Game over')) + '. Score ' + shell.score + '. ' + (practice ? 'Practice, timer off.' : shell.newBest ? 'New best.' : 'Best ' + shell.best + '.')));
       return shell;
     };
     shell.win = function(result){ return end('won', result); };
@@ -1261,7 +1279,7 @@
           change: function(d){ settings.speed = cycle(SHELL.speeds, settings.speed, d); return 'Game speed ' + pct(settings.speed); } }
       ];
       if (opts.timer) rows.push({ id: 'timer', label: 'TIMER', value: function(){ return settings.timer === 'off' ? 'OFF' : 'ON'; },
-        change: function(){ settings.timer = settings.timer === 'off' ? 'on' : 'off'; return 'Timer ' + settings.timer + (settings.timer === 'off' ? ', practice: no best score' : ''); } });
+        change: function(){ settings.timer = settings.timer === 'off' ? 'on' : 'off'; if (settings.timer === 'off' && menu.from === 'paused') practice = true; return 'Timer ' + settings.timer + (settings.timer === 'off' ? ', practice: no best score' : ''); } });
       if (hasHolds) rows.push({ id: 'holds', label: 'HELD KEYS', value: function(){ return settings.holds === 'toggle' ? 'TAP ON/OFF' : 'HOLD'; },
         change: function(){ settings.holds = settings.holds === 'toggle' ? 'hold' : 'toggle'; clearHolds(true); return settings.holds === 'toggle' ? 'Held keys: tap on, tap off' : 'Held keys: hold'; } });
       if (opts.steering) rows.push({ id: 'steering', label: 'STEERING', value: function(){ return pct(settings.steering); },
@@ -1329,25 +1347,35 @@
     }
     // Laid out by ink: value, hudGap, settings, buttonGap, pause, buttonGap, sound, the HUD margin.
     // Settings ink is 1 cap wide, pause 0.75, the speaker 1.25. Hit boxes are taller and meet halfway.
+    // On a touch screen, when neighbouring hit boxes could not each be minTouchCss wide, the gaps
+    // open up until they can: the glyphs move apart rather than the boxes overlapping. A mouse keeps
+    // the compact row (its boxes still never overlap; see touchRow).
     function inks(W, ui){
-      var cap = bar.cap * ui, g = SHELL.buttonGap * ui, sR = rowRight(W, ui), sL = sR - 1.25 * cap, pR = sL - g, pL = pR - 0.75 * cap, gR = pL - g, gL = gR - cap;
-      return { sL: sL, sR: sR, pL: pL, pR: pR, gL: gL, gR: gR, cy: bar.cy * ui };
+      var cap = bar.cap * ui, touch = SHELL.minTouchCss / (view.css || 1), g = SHELL.buttonGap * ui;
+      if (isTouch()) g = Math.max(g, touch - 0.75 * cap);   // pause's box (its ink plus half of each gap) is at least touch wide
+      var sR = rowRight(W, ui), sL = sR - 1.25 * cap, pR = sL - g, pL = pR - 0.75 * cap, gR = pL - g, gL = gR - cap;
+      return { sL: sL, sR: sR, pL: pL, pR: pR, gL: gL, gR: gR, cy: bar.cy * ui, touch: touch };
     }
     shell.buttons = function(W, H, ui){
       ui = ui || 1;
       if (opts.buttons) return opts.buttons(W, H, ui);
       var k = inks(W, ui), b = SHELL.button * ui, y = k.cy - b / 2, m1 = (k.pR + k.sL) / 2, m2 = (k.gR + k.pL) / 2;
+      var reach = isTouch() ? k.touch : 0, mw = Math.max(k.sR + SHELL.inset * ui - m1, reach), gw = Math.max(b, reach);  // outer boxes grow outward only
       return {
-        mute: { x: m1, y: y, w: k.sR + SHELL.inset * ui - m1, h: b, cx: (k.sL + k.sR) / 2, cy: k.cy },
+        mute: { x: m1, y: y, w: mw, h: b, cx: (k.sL + k.sR) / 2, cy: k.cy },
         pause: { x: m2, y: y, w: m1 - m2, h: b, cx: (k.pL + k.pR) / 2, cy: k.cy },
-        settings: { x: m2 - b, y: y, w: b, h: b, cx: (k.gL + k.gR) / 2, cy: k.cy }
+        settings: { x: m2 - gw, y: y, w: gw, h: b, cx: (k.gL + k.gR) / 2, cy: k.cy }
       };
     };
-    // Where the HUD's right-aligned value (score, currency, the last stat) should end.
+    // Where the HUD's right-aligned value (score, currency, the last stat) should end: hudGap
+    // before the settings glyph's ink (its hit box may reach further left).
     shell.hudRight = function(W, ui){
       ui = ui || 1;
       if (opts.buttons === false) return rowRight(W, ui);
-      if (opts.buttons) { var ob = opts.buttons(W, view.H, ui); return (ob.settings || ob.pause).x - SHELL.hudGap * ui; }
+      if (opts.buttons) {
+        var ob = opts.buttons(W, view.H, ui), r = ob.settings || ob.pause;
+        return (r.cx !== undefined ? r.cx - (ob.settings ? 0.5 : 0.375) * bar.cap * ui : r.x) - SHELL.hudGap * ui;
+      }
       return inks(W, ui).gL - SHELL.hudGap * ui;
     };
     shell.hudCenterY = function(ui){ return bar.cy * (ui || 1); };
@@ -1404,8 +1432,7 @@
     }
     // Returns true when the tap was the shell's. Wired automatically when opts.canvas is set.
     shell.pointer = function(x, y){
-      var st = shell.state, b = shell.buttons(view.W, view.H, view.ui);
-      b = { mute: touchable(b.mute), pause: touchable(b.pause), settings: touchable(b.settings) };
+      var st = shell.state, b = touchRow(shell.buttons(view.W, view.H, view.ui));
       unlock();
       if (introUp) { dismissIntro(); return true; }
       if (st === 'settings') { menuPointer(x, y); return true; }
@@ -1423,13 +1450,28 @@
     function touchable(r){
       if (!r) return r;
       var min = SHELL.minTouchCss / (view.css || 1), w = Math.max(r.w, min), h = Math.max(r.h, min);
-      return { x: r.x - (w - r.w) / 2, y: r.y - (h - r.h) / 2, w: w, h: h };
+      return { x: r.x - (w - r.w) / 2, y: r.y - (h - r.h) / 2, w: w, h: h, cx: r.cx };
     }
+    // Grow all three, then make neighbours meet halfway instead of overlapping, so a tap
+    // always lands on the button nearest the finger (a custom opts.buttons layout included).
+    function touchRow(b){
+      var out = { mute: touchable(b.mute), pause: touchable(b.pause), settings: touchable(b.settings) };
+      var row = [out.settings, out.pause, out.mute].filter(Boolean).sort(function(p, q){ return p.x - q.x; });
+      for (var i = 1; i < row.length; i++) {
+        var L = row[i - 1], R = row[i], lr = L.x + L.w;
+        if (lr > R.x) { var mid = (lr + R.x) / 2; L.w = mid - L.x; R.w = R.x + R.w - mid; R.x = mid; }
+      }
+      return out;
+    }
+    // Touch: opts.touch when the game says so, otherwise a coarse pointer or the first touch tap.
+    var touchSeen = !!(typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+    function isTouch(){ return opts.touch !== undefined ? !!opts.touch : touchSeen; }
     function measureCss(){ if (opts.canvas && view.W) { var r = opts.canvas.getBoundingClientRect(); if (r.width) view.css = r.width / view.W; } }
     function onPointer(e){
       var c = opts.canvas, r = c.getBoundingClientRect();
       if (!r.width || !view.W) return;
       view.css = r.width / view.W;
+      if (e.pointerType === 'touch') touchSeen = true;
       var x = (e.clientX - r.left) * view.W / r.width, y = (e.clientY - r.top) * view.H / r.height;
       if (shell.pointer(x, y)) { e.preventDefault(); e.stopImmediatePropagation(); }
     }
@@ -1528,7 +1570,8 @@
         line(res.title || (st === 'won' ? 'ALL CLEAR' : 'GAME OVER'), style.title, { glow: style.gTitle, gap: 18 });
         line(pad(shell.score), style.score, { glow: style.gBody + 1 });
         (res.lines || []).slice(0, 2).forEach(function(t){ line(t, style.small, { color: faint }); });
-        if (shell.newBest) line('NEW BEST', style.body, { color: COLORS.signal, glow: style.gTitle, gap: 10 });
+        if (shell.practice) line('PRACTICE - TIMER OFF', style.small, { color: faint, gap: 10 });
+        else if (shell.newBest) line('NEW BEST', style.body, { color: COLORS.signal, glow: style.gTitle, gap: 10 });
         else line('BEST ' + pad(shell.best), style.small, { color: faint, gap: 10 });
         // The prompt waits out the restart guard; its row is kept so nothing jumps when it appears.
         line(prompt('PLAY AGAIN'), style.body, { blink: true, gap: 22, alpha: canRestart() ? 1 : 0 });
@@ -1614,7 +1657,7 @@
     }
 
     shell.draw = function(ctx, W, H, ui){
-      ui = ui || 1; view.W = W; view.H = H; view.ui = ui;
+      ui = ui || 1; view.W = W; view.H = H; view.ui = ui; measureCss();
       var st = shell.state;
       if (st !== 'playing') {
         if (style.scrim || st === 'settings') { ctx.fillStyle = style.scrimColor || COLORS.scrim; ctx.fillRect(0, 0, W, H); }
@@ -1648,6 +1691,7 @@
     drawLifeIcons: drawLifeIcons, drawCurrency: drawCurrency, drawHud: drawHud, drawStatHud: drawStatHud, createSearchlight: createSearchlight,
     OVERLAYS: OVERLAYS, drawOverlay: drawOverlay,
     ICONS: ICONS, drawIcon: drawIcon,
+    FIRE: { idle: FIRE_IDLE }, BURST: { debrisMinAlpha: BURST_DEBRIS_MIN_ALPHA },
     SHOP: SHOP, shopLayout: shopLayout, drawShopCard: drawShopCard, drawShopButton: drawShopButton, drawPageArrow: drawPageArrow,
     fireButtonGeometry: fireButtonGeometry, drawFireButton: drawFireButton,
     PING_SCALE: PING_SCALE, createSynth: createSynth,

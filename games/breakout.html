@@ -13,8 +13,6 @@
   .cp-stage-portrait { width: min(94vw, 420px, calc((100vh - 48px) * 420 / 640)); width: min(94vw, 420px, calc((100dvh - 48px) * 420 / 640)); }
   .cp-holder, .cp-canvas-portrait { max-height: none; }
   .cp-canvas-portrait { outline: none; }
-  .cp-layer { width: 100%; height: 100%; }
-  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 </style>
 </head>
 <body class="cp-page">
@@ -26,7 +24,6 @@
   </div>
   <div class="cp-hint">drag to move</div>
 </div>
-<div id="gameLive" class="sr-only" role="status" aria-live="polite"></div>
 <script src="../kit/bundle.js"></script>
 <script>
 (function(){
@@ -35,7 +32,6 @@
   const canvas = document.getElementById('game');
   const hudCanvas = document.getElementById('hud');
   const vignetteEl = document.getElementById('vignette');
-  const liveEl = document.getElementById('gameLive');
   const W = 420, H = 640;
 
   // Crisp at devicePixelRatio; CSS (cp-canvas-portrait) handles the on-screen size.
@@ -48,7 +44,8 @@
   const hudCtx = crisp(hudCanvas);
 
   // The game's own events for screen readers (the Shell announces start, pause and the result).
-  function say(text){ liveEl.textContent = ''; setTimeout(() => { liveEl.textContent = text; }, 30); }
+  // The game's own events go through the shell's live region (shell is created further down).
+  function say(text){ try { shell.say(text); } catch (e) {} }
 
   const TOUCH = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
 
