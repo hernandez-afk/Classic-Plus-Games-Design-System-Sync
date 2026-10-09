@@ -8,7 +8,10 @@
 <link rel="stylesheet" href="../kit/bundle.css">
 <style>
   html, body { height: 100%; }
-  .cp-canvas-portrait { box-sizing: border-box; outline: none; }
+  /* The source's own ground, frame, halo and vignette. The boot card is the kit's, the same in every game. */
+  html, body.cp-page { background: #2a2419; }
+  .cp-canvas-portrait { box-sizing: border-box; outline: none; background: #2a2419; border: 2px solid #4a4a4a; box-shadow: 0 0 24px rgba(57,255,136,0.08); }
+  .cp-vignette { background: radial-gradient(ellipse at center, rgba(0,0,0,0) 45%, rgba(0,0,0,0.75) 100%); }
   /* The HUD layer sits inside the playfield's 2px border, like the canvas under it. */
   .cp-layer { box-sizing: border-box; border: 2px solid transparent; }
 </style>
@@ -32,7 +35,6 @@
   const ctx = canvas.getContext('2d');
   const hudCanvas = document.getElementById('hud');
   const hudCtx = hudCanvas.getContext('2d');
-  const vignetteEl = document.getElementById('vignette');
   // The game's own events go through the shell's live region.
   function say(text){ if (shell) shell.say(text); }
 
@@ -142,11 +144,25 @@
   const POST_POINT_DELAY = 0.38;   // game seconds between rallies
   const KB_SPEED = 7;              // px per 60Hz frame
 
-  // Ground: the kit sunrise sky, driven by points won. Night at the first serve,
-  // day breaks over GOALS_TO_DAY points and holds there; a new game resets it to night.
-  const GOALS_TO_DAY = 10;
-  const sky = CP.createSunriseSky();
-  function skyProgress(){ return Math.min(1, goals / GOALS_TO_DAY); }
+  // Ground: the source's own cycle through dark, low-saturation colours as the score
+  // climbs, a full fade every 1000 points, wrapping. Every step keeps ink 14.1:1, the
+  // hint 5.3:1 and every peg colour 3.9:1 or better, so the source values stand.
+  const BG_PALETTE = [
+    { r: 42, g: 36, b: 25 },  // dark beige
+    { r: 26, g: 32, b: 42 },  // dark slate blue
+    { r: 36, g: 28, b: 42 },  // dark muted purple
+    { r: 24, g: 38, b: 36 },  // dark muted teal
+    { r: 42, g: 28, b: 30 }   // dark muted maroon
+  ];
+  const BG_POINTS_PER_STEP = 1000;
+  const BG_EASE = 0.03;   // per 60Hz frame: smooths big score jumps into a gradual fade
+  let bgColor = { ...BG_PALETTE[0] };
+  function getTargetBgColor(){
+    const idx = Math.floor(score / BG_POINTS_PER_STEP);
+    const t = (score % BG_POINTS_PER_STEP) / BG_POINTS_PER_STEP;
+    const a = BG_PALETTE[idx % BG_PALETTE.length], b = BG_PALETTE[(idx + 1) % BG_PALETTE.length];
+    return { r: a.r + (b.r - a.r) * t, g: a.g + (b.g - a.g) * t, b: a.b + (b.b - a.b) * t };
+  }
 
   // Score pegs: each point scored adds one to a formation in the middle; the ball breaks
   // them for bonus points. Colours are the kit's brick tokens (the source's purple
@@ -310,7 +326,7 @@
     nudgeState = 'idle'; pointerYSamples = []; beamStartTime = -Infinity;
     playerFlashUntil = cpuFlashUntil = 0;
     scoreSquares = []; particles = [];
-    sky.progress = 0;
+    bgColor = { ...BG_PALETTE[0] };
     pendingPlayerPeg = false; serveGraceUntil = 0; rallyCount = 0;
     ball.x = W / 2 - BALL_SIZE / 2; ball.y = H / 2 - BALL_SIZE / 2; ball.vx = ball.vy = 0; ball.spin = 0;
     running = false;
@@ -491,8 +507,8 @@
 
     updateParticles(f);
 
-    // The sky chases its target at the kit's 0.015 per 60Hz frame.
-    for (let i = Math.max(1, Math.round(f)); i > 0; i--) sky.update(skyProgress());
+    const bg = getTargetBgColor(), be = 1 - Math.pow(1 - BG_EASE, f);
+    bgColor.r += (bg.r - bgColor.r) * be; bgColor.g += (bg.g - bgColor.g) * be; bgColor.b += (bg.b - bgColor.b) * be;
 
     // Ghost velocities in px per 60Hz frame.
     const gs = Math.pow(GHOST_SMOOTH, f), ns = Math.pow(NUDGE_GHOST_SMOOTH, f);
@@ -506,7 +522,7 @@
   }
 
   // ---- Draw ----
-  const grid = CP.createScopeGrid();   // the shared `grid`, no crosshair: cabinets and space are sister surfaces
+  const grid = CP.createScopeGrid({ color: 'rgba(57,255,136,0.03)', centerColor: 'rgba(57,255,136,0.06)' });   // the source's phosphor graticule and crosshair
 
   function drawPaddleWithFlash(x, y, flashUntil, now){
     const remaining = flashUntil - now;
@@ -540,9 +556,8 @@
     const now = gameMs();
     ctx.save();
     ctx.beginPath(); ctx.rect(0, 0, W, H); ctx.clip();
-    ctx.fillStyle = sky.color();
+    ctx.fillStyle = `rgb(${bgColor.r | 0}, ${bgColor.g | 0}, ${bgColor.b | 0})`;
     ctx.fillRect(0, 0, W, H);
-    vignetteEl.style.opacity = String(sky.vignetteOpacity());
     grid.draw(ctx, W, H, playerX + PADDLE_W / 2, ball.y);
     drawNet();
     drawSmashBeam(now);
