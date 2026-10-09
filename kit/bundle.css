@@ -7,12 +7,13 @@ body { margin: 0; background: var(--void); color: var(--ink); font-family: var(-
 .cp-stage-portrait { display: flex; flex-direction: column; align-items: center; gap: var(--space-8); width: min(94vw, 420px, calc(84vh * 420 / 640)); max-height: 100vh; box-sizing: border-box; padding: var(--space-8) 0; }
 .cp-holder { position: relative; width: 100%; max-height: 84vh; display: flex; justify-content: center; }
 .cp-canvas-portrait { display: block; width: 100%; height: auto; max-height: 84vh; aspect-ratio: 420 / 640; background: var(--field-night);
-  border: 2px solid var(--frame); box-shadow: var(--halo-phosphor); touch-action: none; cursor: none; }
+  border: 2px solid var(--frame); touch-action: none; cursor: none; }
 .cp-layer { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 /* The cabinet's 2px frame is inside its width, and the HUD layer sits inside the same frame, so field and HUD line up. */
 .cp-canvas-portrait { box-sizing: border-box; }
 .cp-holder > .cp-layer { box-sizing: border-box; border: 2px solid transparent; }
-.cp-vignette { position: absolute; inset: 0; pointer-events: none; background: radial-gradient(ellipse at center, rgba(0,0,0,0) 45%, rgba(0,0,0,0.75) 100%); transition: opacity 0.3s linear; }
+/* The same vignette drawVignette paints on canvas (clear to 0.35H, 55% at 0.71H, 92% at 0.75H), laid out for the 420x640 cabinet. */
+.cp-vignette { position: absolute; inset: 0; pointer-events: none; background: radial-gradient(circle farthest-corner at center, rgba(0,0,0,0) 58%, rgba(0,0,0,0.55) 105%, rgba(0,0,0,0.92) 125%); transition: opacity 0.3s linear; }
 .cp-hint { color: var(--ink); font-size: clamp(10px, 2.8vw, 13px); opacity: 0.55; text-align: center; letter-spacing: 1px; }
 
 /* Wide stage (Asteroids): the canvas matches the window up to 1000x800, letterboxed in void. */

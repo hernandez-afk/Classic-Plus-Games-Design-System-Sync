@@ -53,7 +53,7 @@ Every game gets the Shell's shared settings: rebindable single-key controls, hel
 
 ### One background style
 
-Every game follows the design system's "One background stack": a `void` page and letterbox, one kit sky (sunrise for the portrait cabinets Breakout and Pong, the hue sky stepped by wave or moon for Asteroids, Celestipede and Moon Miner), Asteroids' starfield in the space games, the 80px ScopeGrid (`grid-phosphor` with a crosshair in the cabinets, `grid` in space), the kit vignette once, and the cabinet frame or the play-area boundary. Pong's sky dawns over its first 10 points; Celestipede's boss and march tints are brief washes of at most 5%.
+Every game follows the design system's "One background stack" and its **sister surfaces**: a `void` page and letterbox, the same 80px `grid` with no crosshair, the kit vignette once, and the same 2px `frame` edge round every playfield. The grounds share one brightness: the portrait cabinets (Breakout, Pong) sit on the warm sunrise sky that reports progress, the space games (Asteroids, Celestipede, Moon Miner) on the blue hue sky stepped by wave or moon, with Asteroids' starfield. Pong's sky dawns over its first 10 points; Celestipede's boss and march tints are brief washes of at most 5%.
 
 ### Closed gaps, and what still rests on a second cue
 

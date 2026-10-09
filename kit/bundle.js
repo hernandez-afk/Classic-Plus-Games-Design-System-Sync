@@ -9,7 +9,7 @@
   function lerp(a, b, t){ return a + (b - a) * t; }
 
   var COLORS = {
-    void: '#000000', fieldNight: '#14120c', fieldSpace: '#10141f',
+    void: '#000000', fieldNight: '#1f1a0f', fieldSpace: '#10141f',
     ink: '#f5f5f5', inkPure: '#ffffff', inkMuted: 'rgba(255,255,255,0.6)',
     inkFaint: 'rgba(245,245,245,0.3)', inkGhost: 'rgba(245,245,245,0.09)',
     frame: '#4a4a4a', boundary: 'rgba(150,190,220,0.10)', phosphor: '#39ff88',
@@ -302,11 +302,14 @@
     ctx.fillStyle = v;
     ctx.fillRect(0, 0, W, H);
   }
-  function drawPlayAreaBoundary(ctx, W, H){
+  // Every playfield gets the same edge: the cabinet's 2px `frame`, drawn just inside the rect.
+  // Pass x, y to frame a playfield that doesn't start at the canvas corner (a column game's field).
+  function drawPlayAreaBoundary(ctx, W, H, x, y){
+    x = x || 0; y = y || 0;
     ctx.save();
-    ctx.strokeStyle = COLORS.boundary;
-    ctx.lineWidth = 1;
-    ctx.strokeRect(0.5, 0.5, W - 1, H - 1);
+    ctx.strokeStyle = COLORS.frame;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x + 1, y + 1, W - 2, H - 2);
     ctx.restore();
   }
 
@@ -314,7 +317,7 @@
   // The ground colour reports progress. Breakout warms from night to day as
   // the wall comes down; Asteroids steps hue every three waves.
   var SUNRISE = [
-    { t: 0.00, color: [20, 18, 12] },    // night
+    { t: 0.00, color: [31, 26, 15] },    // night: the space ground's sister, warm at the same brightness
     { t: 0.30, color: [24, 26, 48] },    // deep indigo
     { t: 0.55, color: [64, 38, 74] },    // purple dawn
     { t: 1.00, color: [37, 56, 67] }     // deep morning blue: dark so bricks keep 3:1

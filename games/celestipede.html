@@ -1262,7 +1262,7 @@ function render(){
     if (bannerWait && bannerT <= BANNER_OUT + 0.01) vtext(ctx, 'PRESS ' + shell.keyFor('fire') + ' OR TAP TO GO ON', W/2, fieldTop+rows*cell*0.45 + 100*ui, 0.75*ui, { align:'center', color:K.inkMuted, lw:1.3 });
   }
   phosphor();
-  // 7. Edge: the kit's 1px boundary round the playfield (the column), outside the phosphor pass so it stays the token.
+  // 7. Edge: the kit's 2px frame round the playfield (the column), outside the phosphor pass so it stays the token.
   ctx.save(); ctx.translate(Math.round(fieldLeft) - 1, Math.round(fieldTop) - 1);
   CP.drawPlayAreaBoundary(ctx, Math.round(fieldRight) - Math.round(fieldLeft) + 2, Math.round(padTop) - Math.round(fieldTop) + 2);
   ctx.restore();

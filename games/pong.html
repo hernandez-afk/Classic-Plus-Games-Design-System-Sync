@@ -506,7 +506,7 @@
   }
 
   // ---- Draw ----
-  const grid = CP.createScopeGrid({ color: C.gridPhosphor, centerColor: C.gridPhosphorCenter });
+  const grid = CP.createScopeGrid();   // the shared `grid`, no crosshair: cabinets and space are sister surfaces
 
   function drawPaddleWithFlash(x, y, flashUntil, now){
     const remaining = flashUntil - now;
