@@ -51,6 +51,10 @@ Every game gets the Shell's shared settings: rebindable single-key controls, hel
 - **Celestipede:** autofire (no mashing). Pickups carry letters. Explosions no longer cycle colours 24 times a second. Messages STAY holds the wave banner.
 - **Moon Miner:** a crash ends the run on the result screen, and PLAY AGAIN retries the mission (the campaign is kept). Timer off makes the drill clock stop for practice. Gems, pads and decks have non-colour marks. Full-screen flashes are under 9% and off under reduced motion. S is settings, so use Down instead of S.
 
+### One background style
+
+Every game follows the design system's "One background stack": a `void` page and letterbox, one kit sky (sunrise for the portrait cabinets Breakout and Pong, the hue sky stepped by wave or moon for Asteroids, Celestipede and Moon Miner), Asteroids' starfield in the space games, the 80px ScopeGrid (`grid-phosphor` with a crosshair in the cabinets, `grid` in space), the kit vignette once, and the cabinet frame or the play-area boundary. Pong's sky dawns over its first 10 points; Celestipede's boss and march tints are brief washes of at most 5%.
+
 ### Closed gaps, and what still rests on a second cue
 
 - Celestipede: both saucers and the queen's eyes are drawn as enemies (`hostile`, `ink`), never in the player's `signal`. Every pair of meaningful colours on screen together was measured (CIEDE2000, normal vision and three kinds of colour blindness): 25 of 28 pairs are 10 or more apart. The three closer pairs (worm body / missiles, worm head / body, minigun / missiles, 7.3 to 8.6) are told apart by shape and by the M and R letters on pickups and buff bars.

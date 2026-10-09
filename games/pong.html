@@ -17,7 +17,7 @@
 <div class="cp-stage-portrait">
   <div class="cp-holder">
     <canvas id="game" class="cp-canvas-portrait" width="420" height="640" aria-label="Pong playfield"></canvas>
-    <div class="cp-vignette"></div>
+    <div id="vignette" class="cp-vignette"></div>
     <canvas id="hud" class="cp-layer" width="420" height="640"></canvas>
   </div>
   <div class="cp-hint">drag to move, swipe up to smash</div>
@@ -32,6 +32,7 @@
   const ctx = canvas.getContext('2d');
   const hudCanvas = document.getElementById('hud');
   const hudCtx = hudCanvas.getContext('2d');
+  const vignetteEl = document.getElementById('vignette');
   // The game's own events go through the shell's live region.
   function say(text){ if (shell) shell.say(text); }
 
@@ -141,22 +142,11 @@
   const POST_POINT_DELAY = 0.38;   // game seconds between rallies
   const KB_SPEED = 7;              // px per 60Hz frame
 
-  // Ground: slowly cycles through dark, low-saturation colours as the score
-  // climbs (the game's own endless progress sky). Every step keeps ink 14:1
-  // and every peg colour 3.9:1 or better (work/pong/contrast.js).
-  const BG_PALETTE = [
-    { r: 42, g: 36, b: 25 }, { r: 26, g: 32, b: 42 }, { r: 36, g: 28, b: 42 },
-    { r: 24, g: 38, b: 36 }, { r: 42, g: 28, b: 30 }
-  ];
-  const BG_POINTS_PER_STEP = 1000;
-  const BG_EASE = 0.03;
-  let bgColor = { ...BG_PALETTE[0] };
-  function getTargetBgColor(){
-    const idx = Math.floor(score / BG_POINTS_PER_STEP);
-    const t = (score % BG_POINTS_PER_STEP) / BG_POINTS_PER_STEP;
-    const a = BG_PALETTE[idx % BG_PALETTE.length], b = BG_PALETTE[(idx + 1) % BG_PALETTE.length];
-    return { r: a.r + (b.r - a.r) * t, g: a.g + (b.g - a.g) * t, b: a.b + (b.b - a.b) * t };
-  }
+  // Ground: the kit sunrise sky, driven by points won. Night at the first serve,
+  // day breaks over GOALS_TO_DAY points and holds there; a new game resets it to night.
+  const GOALS_TO_DAY = 10;
+  const sky = CP.createSunriseSky();
+  function skyProgress(){ return Math.min(1, goals / GOALS_TO_DAY); }
 
   // Score pegs: each point scored adds one to a formation in the middle; the ball breaks
   // them for bonus points. Colours are the kit's brick tokens (the source's purple
@@ -320,6 +310,7 @@
     nudgeState = 'idle'; pointerYSamples = []; beamStartTime = -Infinity;
     playerFlashUntil = cpuFlashUntil = 0;
     scoreSquares = []; particles = [];
+    sky.progress = 0;
     pendingPlayerPeg = false; serveGraceUntil = 0; rallyCount = 0;
     ball.x = W / 2 - BALL_SIZE / 2; ball.y = H / 2 - BALL_SIZE / 2; ball.vx = ball.vy = 0; ball.spin = 0;
     running = false;
@@ -500,8 +491,8 @@
 
     updateParticles(f);
 
-    const bg = getTargetBgColor(), be = 1 - Math.pow(1 - BG_EASE, f);
-    bgColor.r += (bg.r - bgColor.r) * be; bgColor.g += (bg.g - bgColor.g) * be; bgColor.b += (bg.b - bgColor.b) * be;
+    // The sky chases its target at the kit's 0.015 per 60Hz frame.
+    for (let i = Math.max(1, Math.round(f)); i > 0; i--) sky.update(skyProgress());
 
     // Ghost velocities in px per 60Hz frame.
     const gs = Math.pow(GHOST_SMOOTH, f), ns = Math.pow(NUDGE_GHOST_SMOOTH, f);
@@ -549,8 +540,9 @@
     const now = gameMs();
     ctx.save();
     ctx.beginPath(); ctx.rect(0, 0, W, H); ctx.clip();
-    ctx.fillStyle = `rgb(${bgColor.r | 0}, ${bgColor.g | 0}, ${bgColor.b | 0})`;
+    ctx.fillStyle = sky.color();
     ctx.fillRect(0, 0, W, H);
+    vignetteEl.style.opacity = String(sky.vignetteOpacity());
     grid.draw(ctx, W, H, playerX + PADDLE_W / 2, ball.y);
     drawNet();
     drawSmashBeam(now);

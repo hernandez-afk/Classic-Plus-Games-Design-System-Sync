@@ -12,17 +12,12 @@
   html, body { margin:0; height:100%; overflow:hidden; background:var(--void); }
   body { touch-action:none; user-select:none; -webkit-user-select:none; -webkit-touch-callout:none; -webkit-tap-highlight-color:transparent; }
   #c { position:fixed; top:0; left:0; width:100%; height:100%; display:block; outline:none; touch-action:none; }
-  #vig { position:fixed; top:0; left:0; right:0; bottom:0; pointer-events:none;
-    background:radial-gradient(ellipse at center, rgba(0,0,0,0) 45%, rgba(0,0,0,0.85) 100%);
-    opacity:0.3; transition:opacity 0.3s linear; }
-  @media (prefers-reduced-motion: reduce) { #vig { transition:none; } }
   #safe { position:fixed; top:0; left:0; visibility:hidden; pointer-events:none;
     padding:env(safe-area-inset-top,0px) env(safe-area-inset-right,0px) env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px); }
 </style>
 </head>
 <body>
 <canvas id="c" aria-label="Moon Miner playfield"></canvas>
-<div id="vig"></div>
 <div id="safe"></div>
 <script src="../kit/bundle.js"></script>
 <script>
@@ -36,9 +31,14 @@
 const CP = window.ClassicPlus, K = CP.COLORS;
 const C = { ink:K.ink, muted:'#9a9a9a', smoke:'#4a4a4a', blue:K.signal, red:K.brickRed, orange:K.brickOrange, green:K.brickGreen,
   yellow:K.brickYellow, coin:K.coin, hostile:K.hostile, alert:K.alert, inkMuted:K.inkMuted,
-  faint:K.inkFaint, grid:K.grid, cross:'rgba(255,255,255,0.06)' };
-// colour is meaning: red is worth the most, yellow the least (and every pad says X2..X5 too)
-const MULT_COL = { 2:C.yellow, 3:C.green, 4:C.orange, 5:C.red };
+  faint:K.inkFaint, gemRed:K.brickCracked };
+// colour is meaning: red is worth the most, yellow the least (and every pad says X2..X5 too). The top rung is
+// `brick-cracked` (the ladder's raspberry red): `brick-red` is only 4.0:1 on the hue sky, under 4.5:1 for the
+// X5 label and the +points text; `brick-cracked` keeps 4.6:1 on every hue. C.red stays for lava and the slot 7.
+const MULT_COL = { 2:C.yellow, 3:C.green, 4:C.orange, 5:C.gemRed };
+// pad labels and the landing message: the ladder colour, except X5 in ink. Right under its bright pad bar the
+// phosphor bloom lifts the hue sky enough that no kit red keeps 4.5:1 there (brick-cracked fell to 3.2:1).
+const LABEL_COL = { 2:C.yellow, 3:C.green, 4:C.orange, 5:C.ink };
 // phosphor bloom strengths. Measured on rendered frames (bloom only adds light, but it lifts the ground beside a
 // stroke more than the stroke itself, which is already near white): at 0.42 / 0.55 ink text fell to 3.2:1 against
 // its own halo and the lander in the raid beam to 1:1. At these values every text stroke keeps 4.5:1 and every
@@ -110,10 +110,10 @@ const rnd = (a,b) => a + Math.random()*(b-a);
 
 // ---------- canvas & layout ----------
 const cv = document.getElementById('c'), ctx = cv.getContext('2d');
-const probe = document.getElementById('safe'), vig = document.getElementById('vig');
+const probe = document.getElementById('safe');
 const GL = [0,1,2].map(() => { const c = document.createElement('canvas'); return { c, x:c.getContext('2d') }; });
 const WH = 900, FIELD_W = 470;                          // world size in units: a portrait playfield
-let FX = 0, fieldL = 0, fieldR = 0;                     // playfield edges on screen this frame                // world height in units
+let FX = 0;                                              // screen x where the playfield column starts
 let W=0, H=0, D=1, safe={t:0,r:0,b:0,l:0}, touch=false, bandH=0, viewH=0, k=1, WW=1000;
 
 function readSafe(){
@@ -136,6 +136,7 @@ function resize(){
   UI = clamp(Math.min(W/420, H/700), 1, 1.3);           // text and HUD scale: never below 1, so the 0.75 floor is a 9px cap
   VW = Math.max(240, W - 2*FX - 24, Math.min(W - 24, 440*UI));   // wrap width: the column, but never narrower than a phone
   sizeStation();
+  buildStars();
 }
 function enableTouch(){
   if (touch) return; touch = true; resize();   // drag controller: no button band
@@ -1335,12 +1336,12 @@ function drawMap(t){
 }
 function startGame(){
   for (const k in up) up[k] = 0; applyUpgrades();
-  drillBroken = false; credits = 0; score = 0; fuel = FUELMAX; wave = 1; parts = []; rings = []; cargo = []; tally = null;
+  drillBroken = false; credits = 0; score = 0; fuel = FUELMAX; wave = 1; parts = []; rings = []; cargo = []; tally = null; sky.hue = sky.target(1);
   buildMap(); saveGame(); startLevel(mapPos); sfxStart();
 }
 // ---------- drilling ----------
 const GEM_VAL = { yellow:10, green:20, orange:40, red:80 };     // credits per gem before the pad multiplier
-const GEM_COL = { yellow:C.yellow, green:C.green, orange:C.orange, red:C.red };
+const GEM_COL = { yellow:C.yellow, green:C.green, orange:C.orange, red:C.gemRed };
 const DIRS = [[0,1],[-1,0],[0,-1],[1,0]];   // down, left, up, right
 const DRILL_SPEED = 42;
 const MAGNET = [0, 16, 26, 40];
@@ -1359,9 +1360,35 @@ const cargoFull = () => cargo.length >= cargoMax;
 let turnQ = [];
 const inRun = () => ['ready','play','landed','crashed','drill','drilled','beam','docked','raid'].indexOf(state) >= 0;
 let thrLock = false, lowWarned = false, lowT = 9;
-const starLayers = [0.12, 0.28, 0.5].map((d, i) => ({ d, pts: Array.from({ length:[70, 45, 22][i] }, () =>
-  ({ u:Math.random(), v:Math.random(), s: i === 2 ? 2 : 1 + (Math.random() < 0.2 ? 1 : 0), a:[0.25, 0.4, 0.6][i]*rnd(0.6, 1) })) }));
-let parX = 500, parY = 300;                             // eased player position driving the parallax
+// background stack (the system's one background, as Asteroids): hue sky by moon number, Asteroids' starfield,
+// the kit's 80px scope grid, the field, the kit vignette, the play-area boundary, then the HUD
+const sky = CP.createHueSky();                          // space-hue-start, +60 every three moons
+const scopeGrid = CP.createScopeGrid();                 // `grid`, no crosshair
+let bgStars = [];                                       // Asteroids' field: 330 per 1000x800, scaled by area
+function buildStars(){
+  bgStars = [];
+  const n = Math.round(330 * W*H / (1000*800));
+  for (let i=0;i<n;i++){ const depth = rnd(0.25, 1);
+    bgStars.push({ x:rnd(0, W), y:rnd(0, H), depth, size: depth > 0.75 ? 2 : 1, baseAlpha: rnd(0.25, 0.5) + depth*0.4, phase: rnd(0, Math.PI*2), twinkleSpeed: rnd(0.015, 0.05) }); }
+}
+function updateStars(dt){                               // twinkle, and drift opposite the lander (held still under reduced motion)
+  if (CP.motionReduced()) return;
+  const f = dt*60, fly = state === 'play' || state === 'raid';
+  for (const s of bgStars){
+    s.phase += s.twinkleSpeed*f;
+    if (fly){
+      s.x -= L.vx*k*dt * s.depth * 0.5; s.y -= L.vy*k*dt * s.depth * 0.5;
+      if (s.x < 0) s.x += W; if (s.x > W) s.x -= W; if (s.y < 0) s.y += H; if (s.y > H) s.y -= H;
+    }
+  }
+}
+function drawStars(){
+  for (const s of bgStars){
+    const tw = 0.5 + 0.5*Math.sin(s.phase), a = s.baseAlpha*(0.4 + 0.6*tw);
+    ctx.fillStyle = 'rgba(255,255,255,' + a.toFixed(3) + ')'; ctx.fillRect(s.x, s.y, s.size, s.size);
+  }
+}
+let parX = 500, parY = 300;                             // eased player position driving the grid parallax
 const LOW_FUEL = 250;
 const CANISTER_FUEL = 300;                                   // low-fuel reminder threshold
 function seedDeposits(pad){
@@ -1598,7 +1625,7 @@ function land(pad, hard){
   state = 'landed'; roundT = 1.6; drill.pad = pad;
   msg = hard ? 'HARD LANDING' : perfect ? 'PERFECT LANDING' : 'GOOD LANDING';
   msg2 = hard ? 'DRILL ENERGY -35%' : first ? '+' + pts_ + (perfect ? '  +50 FUEL' : '') : '';
-  msgCol = hard ? C.alert : MULT_COL[pad.mult];
+  msgCol = hard ? C.alert : LABEL_COL[pad.mult];
   sfxLand(perfect); resetGate('landed'); say(msg + (msg2 ? '. ' + msg2.replace(/  /g, ' ') : '') + '.');
 }
 function crash(reason){
@@ -1758,7 +1785,7 @@ function continueGame(){
   const nodes = d.nodes.map(n => ({ id:String(n.id), type:n.type, level:Number(n.level) || 1, x:Number(n.x), y:Number(n.y), next:(n.next || []).map(String), size:Number(n.size) || 1, seen:!!n.seen, stars:Number(n.stars) || 0, paid:Number(n.paid) || 0 }));
   starMap = { nodes, byId:Object.fromEntries(nodes.map(n => [n.id, n])), scroll:0 };
   mapPos = starMap.byId[d.pos] || nodes[0]; starMap.scroll = mapPos.y;
-  mission = 'moon'; rescue = null; wave = mapPos.level || 1;
+  mission = 'moon'; rescue = null; wave = mapPos.level || 1; sky.hue = sky.target(wave);
   genTerrain(); openMap(); sfxStart();
 }
 if (SAVE_ON){ savedGame = readSave(lsGet(SAVE_KEY)); }
@@ -2000,6 +2027,7 @@ let newConfirm = 0;
 // ---------- update ----------
 function update(dt){
   gclock += dt;
+  sky.update(wave); updateStars(dt);
   const q = pressQ; pressQ = []; q.forEach(handlePress);
   if (state === 'shop'){ shopT += dt; for (const k in shopFlash) shopFlash[k] = shopFlash[k] > 0 ? Math.max(0, shopFlash[k] - dt*2.4) : Math.min(0, shopFlash[k] + dt*2.4);
     if (homeNote){ homeNote.t += dt; if (homeNote.t > 3.5 && gate('home')) homeNote = null; }
@@ -2146,15 +2174,10 @@ function update(dt){
   const engineLive = !paused && (state === 'play' || (state === 'raid' && raid && (raid.phase === 'fight' || raid.phase === 'escape')));
   if (!engineLive) L.thr = false;
   if (AC && thrustGain) thrustGain.gain.setTargetAtTime(L.thr && engineLive ? 0.38 : 0, AC.currentTime, 0.03);
-  // controls & vignette
-  let danger = 0;
-
-  if (state === 'play'){ if (alt < 160 && L.vy > SAFE_VY) danger = 1; else if (fuel <= LOW_FUEL) danger = 0.6; }
-  vig.style.opacity = String(0.3 + danger*0.5);
 }
 
 // ---------- render ----------
-function bgColor(){ const hue = state === 'map' ? 228 : (228 + (wave-1)*28) % 360; return 'hsl(' + hue + ',62%,4.5%)'; }   // starts as a very dark blue
+function bgColor(){ return sky.color(); }               // the kit hue sky, stepped by moon number
 function render(t){
   const bg = bgColor();
   ctx.setTransform(D,0,0,D,0,0);
@@ -2174,49 +2197,13 @@ function render(t){
   // shake offsets are rolled in update(), so a paused frame holds perfectly still (and reduced motion has none)
   const ox = W/2 - camX*S + shx, oy = viewH/2 - camY*S + shy;
   const toSX = x => x*S + ox, toSY = y => y*S + oy;
-  fieldL = toSX(0); fieldR = toSX(WW);
 
-  // scope grid: a plane just behind the world, so it zooms with the camera (bigger squares up close)
-  // and slides a little slower than the terrain for parallax. Only the centre line is locked to the station.
-  // On top of that, the grid and the starfield drift against the player's own movement,
-  // so flying around visibly slides the background. The two centre lines stay locked to the world.
-  const PAR = 0.8, gs = S*PAR, gp = 80 / (k*PAR) * gs;          // gp = on-screen pitch: the kit's 80px scope grid at zoom 1
-  const mapMode = state === 'map' && starMap;              // star map: only grid + stars, drifting with the chart
-  const pmx = mapMode ? 0 : -(parX - WW/2) * k, pmy = mapMode ? (starMap ? starMap.scroll*0.9 : 0) : -(parY - WH/2) * k;   // drift, in screen px at zoom 1
-  const gox = W/2 + (ST.x - camX)*gs + shx + pmx*0.35, goy = viewH/2 + (WH/2 - camY)*gs + shy + pmy*0.35;
-  const gsx = toSX(ST.x), gcy = toSY(WH/2);
-  ctx.lineWidth = 1; ctx.strokeStyle = C.grid; ctx.beginPath();
-  for (let x = (gox % gp + gp) % gp; x < W; x += gp){ ctx.moveTo(Math.round(x)+0.5, 0); ctx.lineTo(Math.round(x)+0.5, viewH); }
-  for (let y = (goy % gp + gp) % gp; y < viewH; y += gp){ ctx.moveTo(0, Math.round(y)+0.5); ctx.lineTo(W, Math.round(y)+0.5); }
-  ctx.stroke();
-  if (!mapMode){
-    ctx.strokeStyle = C.cross; ctx.beginPath();
-    ctx.moveTo(Math.round(gsx)+0.5, 0); ctx.lineTo(Math.round(gsx)+0.5, viewH);
-    if (gcy > 0 && gcy < viewH){ ctx.moveTo(0, Math.round(gcy)+0.5); ctx.lineTo(W, Math.round(gcy)+0.5); }
-    ctx.stroke();
-  }
-  // starfield: three depth layers in screen space, each sliding at its own rate
-  ctx.fillStyle = C.ink;
-  for (const st of starLayers){
-    const d = st.d, ox = pmx*d + (W/2 - camX*S)*d*0.3, oy = pmy*d + (viewH/2 - camY*S)*d*0.3;
-    for (const p of st.pts){
-      const x = ((p.u*W + ox) % W + W) % W, y = ((p.v*viewH + oy) % viewH + viewH) % viewH;
-      ctx.globalAlpha = p.a; ctx.fillRect(Math.round(x), Math.round(y), p.s, p.s);
-    }
-  }
-  ctx.globalAlpha = 1;
-  // side fade: outside the playfield the grid and stars fall away to black toward the screen edges
-  {
-    const sideFade = (x0, x1) => {                      // x0 = playfield edge, x1 = screen edge
-      if (Math.abs(x1 - x0) < 4) return;
-      const g = ctx.createLinearGradient(x0, 0, x1, 0);
-      g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(0.45, 'rgba(0,0,0,0.75)'); g.addColorStop(1, 'rgba(0,0,0,1)');
-      ctx.fillStyle = g; ctx.fillRect(Math.min(x0, x1), 0, Math.abs(x1 - x0), H);
-    };
-    const eL = mapMode ? FX : fieldL, eR = mapMode ? W - FX : fieldR;   // the map uses the zoomed-out column
-    if (eL > 4) sideFade(eL, 0);
-    if (eR < W - 4) sideFade(eR, W);
-  }
+  // stars, then the kit's 80px scope grid drifting opposite the lander (eased; still on the map and under
+  // reduced motion). Both are screen space and fill the whole canvas, as in Asteroids.
+  const mapMode = state === 'map' && starMap;              // star map: only grid + stars
+  drawStars();
+  const flying = !mapMode && state !== 'title' && L.alive;
+  scopeGrid.draw(ctx, W, H, flying ? FX + parX*k : undefined, flying ? parY*k : undefined);
 
   if (!mapMode){                                         // (the whole game world is skipped on the star map)
   ctx.save();
@@ -2243,10 +2230,10 @@ function render(t){
   for (const pd of pads){                          // mining layer: fades out once you're flying again
     const mv = pd.vis || 0;
     if (!pd.gems || mv <= 0.001) continue;
-    // bedrock blocks are obstacles: the game's dark fill stays, and each block gets an edge that reads at 3:1
-    // or better on the brightest sky (#6e6e6e 3.6:1). The unbreakable floor keeps its darker fill under one
-    // continuous blue-grey edge (#64647f 3.2:1): a different hue and no gaps, so it reads apart from the blocks.
-    const ROCK = '#6e6e6e', FLOOR = '#64647f', ROCK_FILL = '#3a3a3a', FLOOR_FILL = '#202027';
+    // bedrock blocks are obstacles: the game's dark fill stays, and each block gets an `ink-muted` edge (6.2:1 or
+    // better on every hue sky; the old #6e6e6e fell to 2.9:1). The unbreakable floor keeps its darker fill under one
+    // continuous `brick-steel` edge (the ladder's never-breaks grey, 3.7:1 or better): no gaps, so it reads apart.
+    const ROCK = K.inkMuted, FLOOR = K.brickSteel, ROCK_FILL = '#3a3a3a', FLOOR_FILL = '#202027';
     ctx.globalAlpha = mv; ctx.lineJoin = 'miter';
     for (const q of pd.rocks){
       if (q.floor){                                   // unbreakable floor: one flat, darker colour (a different material)
@@ -2367,13 +2354,15 @@ function render(t){
   }
 
   ctx.setTransform(D,0,0,D,0,0);
+  // the kit vignette, once, over the field (labels and HUD stay on top of it)
+  CP.drawVignette(ctx, W, H);
   // pad labels in screen space
   if (state !== 'title' && state !== 'raid' && state !== 'map' && state !== 'casino'){
     const ls = clamp(0.55 * Math.sqrt(zoom), 0.55, 0.9);
     for (const p of pads){
       const sx = toSX((p.x0 + p.x1)/2), sy = toSY(p.y) + 10 + 12*ls;
       if (sx < -40 || sx > W + 40 || sy > viewH - 2 || sy < 0) continue;
-      vtext(ctx, p.failed ? 'CLOSED' : p.drilled ? 'LOCKED' : 'X' + p.mult, sx, sy, ls, { align:'center', color: p.drilled ? C.muted : MULT_COL[p.mult], lw:1.4 });
+      vtext(ctx, p.failed ? 'CLOSED' : p.drilled ? 'LOCKED' : 'X' + p.mult, sx, sy, ls, { align:'center', color: p.drilled ? C.muted : LABEL_COL[p.mult], lw:1.4 });
     }
   }
   for (const f of floaters){
@@ -2381,13 +2370,10 @@ function render(t){
     if (f.life < 0) continue;
     vtext(ctx, f.text, sx, sy, f.sz || 0.7, { align:'center', color:mc(f.col), lw:1.5, glow: f.sz > 0.85 ? 2 : 0, alpha: f.life < 0.8 ? 1 : Math.max(0, 1 - (f.life - 0.8)/0.5) });
   }
-  if (state !== 'title'){                                // faint frame lines where the playfield ends (wide screens)
-    const e0 = mapMode ? FX : toSX(0), e1 = mapMode ? W - FX : toSX(WW);
-    ctx.fillStyle = C.faint;
-    if (e0 > 2) ctx.fillRect(Math.round(e0) - 1, 0, 1, viewH);
-    if (e1 < W - 2) ctx.fillRect(Math.round(e1), 0, 1, viewH);
+  {                                                      // the kit play-area boundary (1px `boundary`) round the playfield column
+    const e0 = mapMode || state === 'title' ? FX : toSX(0), e1 = mapMode || state === 'title' ? W - FX : toSX(WW);
+    ctx.save(); ctx.translate(Math.round(e0), 0); CP.drawPlayAreaBoundary(ctx, Math.round(e1) - Math.round(e0), viewH); ctx.restore();
   }
-  if (touch){ ctx.fillStyle = C.faint; ctx.fillRect(0, viewH, W, 1); }
 
   if (inRun()) drawHUD(t);
   if (state === 'raid' && raid) drawRaidHUD(t);
@@ -2834,7 +2820,10 @@ function drawHUD(t){
       else { ctx.strokeStyle = C.inkMuted; ctx.lineWidth = 1.5; ctx.strokeRect(st0 + i*(ss + sg) + 0.75, sy + 0.75, ss - 1.5, ss - 1.5); } }
   }
   if (drilling){
-    const dy0 = y0 + lh + 22*UI, untimed = !shell.timerOn();
+    const untimed = !shell.timerOn();
+    // On a narrow screen the drill row would run into the QUOTA line on the left: drop it below that line.
+    const dwReserve = textW(untimed ? 'DRILL UNTIMED' : 'DRILL 00.0S', 0.8*h), qw = textW('SURVIVORS 00/00', 0.75*UI);
+    const dy0 = y0 + lh + 22*UI + (xr - dwReserve < x0 + qw + 12*UI ? 2*lh : 0);
     // low drill energy blinks (2 a second) rather than changing colour: the bugs down here are the red
     const lowD = !untimed && ((drill.left < 3 && drill.started) || drill.selfBurn > 0);
     const dtxt = untimed ? 'DRILL UNTIMED' : 'DRILL ' + drill.left.toFixed(1).padStart(4,'0') + 'S';

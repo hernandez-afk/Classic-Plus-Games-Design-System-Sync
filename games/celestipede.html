@@ -7,30 +7,21 @@
 <link rel="stylesheet" href="../kit/tokens.css">
 <link rel="stylesheet" href="../kit/bundle.css">
 <style>
-  :root {
-    --bg-space: #141b2a;
-    color-scheme: dark;
-    background: var(--bg-space);
-  }
-  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg-space: #141b2a; } }
-  :root[data-theme="dark"] { --bg-space: #141b2a; }
+  :root { color-scheme: dark; background: var(--void); }
   html { height: 100%; }
-  body { height: 100%; margin: 0; background: var(--bg-space); overflow: hidden;
+  body { height: 100%; margin: 0; background: var(--void); overflow: hidden;
     font-family: var(--font-mono); -webkit-user-select: none; user-select: none;
     -webkit-touch-callout: none; overscroll-behavior: none; }
   #wrap { position: fixed; inset: 0; overflow: hidden;
     padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); box-sizing: border-box; }
   #inner { position: relative; width: 100%; height: 100%; }
   canvas#c { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; outline: none; }
-  #vignette { position: absolute; inset: 0; pointer-events: none;
-    background: radial-gradient(ellipse at center, rgba(0,0,0,0) 50%, rgba(0,0,0,0.6) 100%); }
 </style>
 <script src="../kit/bundle.js"></script>
 </head>
 <body>
 <div id="wrap"><div id="inner">
   <canvas id="c" tabindex="0" aria-label="Celestipede game field"></canvas>
-  <div id="vignette"></div>
 </div></div>
 <script>
 (function(){
@@ -96,6 +87,7 @@ function layout(){
   }
   zoneTop = rows - 5;
   if (tank) tank.x = clampTankX(tank.x);
+  buildStars();
 }
 const cx = c => fieldLeft + (c+0.5)*cell, cy = r => fieldTop + (r+0.5)*cell;
 const rand = (a,b) => a + Math.random()*(b-a);
@@ -135,26 +127,32 @@ const LAB = false;
 function freshBuffs(){ return {minigun:0,missiles:0,shield:0,wideshot:0,beam:0,clone:0}; }
 let beamT=0, beamTick=0, labOn=new Set();
 let worms=[], tank=null, bullets=[], missiles=[], explosions=[], pickups=[], fireCd=0, shotCount=0, buffs=freshBuffs(), saucer=null, comets=[], particles=[], popups=[];
-const BANNER=1.3, BANNER_OUT=0.4;
-let stepTime=0.14, stepAcc=0, stepCount=0, bannerT=0, saucerT=6, reinforceT=0, dieT=0, overT=0, cometCheck=0, bgHue=220, hueDrift=0, saucerSnd=0;
+const BANNER=1.3, BANNER_OUT=0.4, WASH_MAX=0.05;   // event washes change the sky's luminance by under 9%
+let stepTime=0.14, stepAcc=0, stepCount=0, bannerT=0, saucerT=6, reinforceT=0, dieT=0, overT=0, cometCheck=0, saucerSnd=0;
 
-/* ---------- Starfield ---------- */
-const stars = [], scope = CP.createScopeGrid({ color: CP.COLORS.gridPhosphor });
-(function(){ const layers=[{d:0.06,n:70,sz:1,a:0.35},{d:0.16,n:40,sz:1.5,a:0.55},{d:0.34,n:18,sz:2,a:0.85}];
-  layers.forEach((L,li)=>{ for (let i=0;i<L.n;i++) stars.push({ x:Math.random(), y:Math.random(), d:L.d, sz:L.sz, a:L.a*rand(0.6,1),
-    layer:li, blue: Math.random()<0.12, tw:rand(0,6.28), tws:rand(1,3) }); }); })();
+/* ---------- Background stack: hue sky, Asteroids' starfield, scope grid ---------- */
+// The kit's hue sky (space-hue-start, +60 every three waves), stepped by the wave.
+const sky = CP.createHueSky(), scope = CP.createScopeGrid();   // default `grid` colour, no crosshair
+// Asteroids' starfield: 330 stars per 1000x800, scaled by area; depth 0.25-1, 2px when near.
+let stars = [];
+function buildStars(){
+  stars = []; const n = Math.round(330 * (W*H) / (1000*800));
+  for (let i=0;i<n;i++){ const depth = rand(0.25, 1);
+    stars.push({ x:rand(0,W), y:rand(0,H), depth, size: depth > 0.75 ? 2 : 1, baseAlpha: rand(0.25,0.5) + depth*0.4,
+      phase: rand(0, 6.283), twinkleSpeed: rand(0.015, 0.05) }); }
+}
+function updateStars(){   // once a frame, as Asteroids does; parallax opposite the tank, still under reduced motion
+  const vx = (tank && phase==='play' && shell && shell.isPlaying()) ? tank.vx/60 : 0;
+  for (const st of stars){ st.phase += st.twinkleSpeed;
+    if (vx){ st.x -= vx*st.depth*0.5; if (st.x < 0) st.x += W; if (st.x > W) st.x -= W; } }
+}
 let shake = 0, rumble = 0;   // camera shake: decaying impulses + a sustained rumble
-let parX = 0, bossDark = 0, marchTint = 0, soot = [];
+let bossWash = 0, bossWashT = 0, marchWash = 0, marchWashT = 0, marchTint = 0, soot = [], hadBoss = false, hadMarch = false;
 function drawStars(){
-  const drift = reduced() ? 0 : time*9, px0 = reduced() ? 0 : parX;
   for (const st of stars){
-    const px = (((st.x*W - px0*st.d*2.2) % W) + W) % W;
-    const py = (((st.y*H - drift*st.d*3) % H) + H) % H;
-    const tw = Math.sin(time*st.tws+st.tw) > 0.85 ? 0.45 : 1;
-    ctx.globalAlpha = st.a*tw; const col = st.blue ? C.blue : C.ink;
-    ctx.fillStyle=col; ctx.fillRect(Math.round(px), Math.round(py), st.sz, st.sz);
+    const twinkle = 0.5 + 0.5*Math.sin(st.phase), alpha = st.baseAlpha*(0.4 + 0.6*twinkle);
+    ctx.fillStyle = 'rgba(255,255,255,' + alpha.toFixed(3) + ')'; ctx.fillRect(st.x, st.y, st.size, st.size);
   }
-  ctx.globalAlpha=1;
 }
 function clampTankX(x){ return Math.max(cx(0), Math.min(cx(cols-1), x)); }
 function seedAsteroids(){
@@ -192,7 +190,7 @@ function resetGame(){
   unlocked = LAB ? Object.keys(PICKUPS) : ['shield']; bannerSub = null; bossWins = 0;
   score=0; kills=0; lives=3; timers=[]; shake=0; rumble=0; mouseFire=false; bannerWait=false; phase='play'; marchNext=false;
   if (shell) shell.setScore(0); wave=1; nextLife=20000; lifeStep=25000; bossFights=0; pendingDrop=null; particles=[]; popups=[];
-  worms=[]; bullets=[]; missiles=[]; explosions=[]; pickups=[]; buffs=freshBuffs(); saucer=null; comets=[]; boss=null; sucked=[]; drift=[]; clone=null; cloneCd=0; march=null; bombs=[]; soot=[]; lastWasMarch=false; saucerT=saucerGap();
+  worms=[]; bullets=[]; missiles=[]; explosions=[]; pickups=[]; buffs=freshBuffs(); saucer=null; comets=[]; boss=null; sucked=[]; drift=[]; clone=null; cloneCd=0; march=null; bombs=[]; soot=[]; marchTint=0; bossWash=0; bossWashT=0; marchWash=0; marchWashT=0; hadBoss=false; hadMarch=false; sky.hue=sky.start; lastWasMarch=false; saucerT=saucerGap();
   seedAsteroids(); tank = { x:(fieldLeft+fieldRight)/2, vx:0, target:null };
   bannerT=bannerLen=BANNER; phase='play'; stepAcc=0; bannerWait = !!(shell && shell.messagesStay()); inputSeen = false;
 }
@@ -837,9 +835,12 @@ function afterDeath(){
 
 function update(dt){
   time += dt; runTimers(dt);
-  { const tgt = tank ? tank.x - W/2 : 0; parX += (tgt-parX)*Math.min(1, dt*3); }
-  hueDrift += dt*3;
-  bossDark += ((boss ? 1 : 0) - bossDark) * Math.min(1, dt*0.8);
+  // Event washes: a brief tint over the sky when the queen or the marchers arrive (at most WASH_MAX, see render).
+  if (boss && !hadBoss) bossWashT = 3; hadBoss = !!boss;
+  if (march && !hadMarch) marchWashT = 3; hadMarch = !!march;
+  bossWashT = Math.max(0, bossWashT - dt); marchWashT = Math.max(0, marchWashT - dt);
+  bossWash += ((bossWashT > 0 ? 1 : 0) - bossWash) * Math.min(1, dt*1.5);
+  marchWash += ((marchWashT > 0 ? 1 : 0) - marchWash) * Math.min(1, dt*1.5);
   { let tgt = 0;
     if (boss){
       if (boss.state==='open') tgt = cell*0.16*Math.min(1, boss.t/1.0);
@@ -854,7 +855,6 @@ function update(dt){
     soot.push({ x:rand(0,W), y:-4, vy:cell*rand(0.5,1.4), ph:rand(0,6.28), sw:rand(4,14), sz: Math.random()<0.6?2:3, al:rand(0.35,0.9) }); n-=1; } }
   for (const p of soot) p.y += p.vy*dt;
   soot = marchTint > 0 ? soot.filter(p => p.y < H+4) : [];
-  bgHue += ((220 + (wave-1)*38 + hueDrift) - bgHue) * Math.min(1, dt*4);
   for (let r=0;r<rows;r++) for (let c=0;c<cols;c++){ const a=grid[r][c]; if (a) a.rot += a.spin*dt; }
   for (const p of particles){ const f = Math.pow(p.fr||0.92, dt*60); p.vx*=f; p.vy*=f; p.vy+=p.g*dt; p.x+=p.vx*dt; p.y+=p.vy*dt; p.age+=dt; }
   particles = particles.filter(p => p.age < p.life);
@@ -1129,22 +1129,26 @@ function drawComet(k){
 
 function render(){
   ctx.setTransform(dpr,0,0,dpr,0,0);
-  ctx.fillStyle = `hsl(${bgHue%360},${36-16*bossDark}%,${(12-8*bossDark)/(1+GLOW.tight+GLOW.wide)}%)`; ctx.fillRect(0,0,W,H);
-  // scope grid
-  if (marchTint > 0.01){ ctx.globalAlpha = marchTint; ctx.fillStyle = `hsl(345,62%,${9/(1+GLOW.tight+GLOW.wide)}%)`; ctx.fillRect(0,0,W,H); ctx.globalAlpha = 1; }
-  drawStars();
+  // 2. Ground: the kit hue sky. The phosphor pass adds the frame back at GLOW.tight + GLOW.wide,
+  // so the fill goes down by that factor and the sky lands on screen at exactly sky.color().
+  const BLOOM = 1 + GLOW.tight + GLOW.wide;
+  ctx.fillStyle = `hsl(${sky.hue.toFixed(1)},${sky.saturation}%,${(sky.lightness/BLOOM).toFixed(3)}%)`; ctx.fillRect(0,0,W,H);
+  // Event washes over the sky: brief (3 s), at most WASH_MAX opacity.
+  if (bossWash > 0.01){ ctx.globalAlpha = WASH_MAX*bossWash; ctx.fillStyle = '#000'; ctx.fillRect(0,0,W,H); }
+  if (marchWash > 0.01){ ctx.globalAlpha = WASH_MAX*marchWash; ctx.fillStyle = `hsl(345,62%,${(9/BLOOM).toFixed(3)}%)`; ctx.fillRect(0,0,W,H); }
+  ctx.globalAlpha = 1;
+  drawStars();   // 3. stars
   { const a = (shell.isPlaying() && !reduced()) ? shake + rumble : 0;   // no shake when paused or under reduced motion
     if (a > 0.05) ctx.translate(rand(-a, a), rand(-a, a)); }
   for (const p of soot){ ctx.globalAlpha = p.al * marchTint; ctx.fillStyle = C.red; ctx.fillRect(Math.round(p.x + Math.sin(time*0.8+p.ph)*p.sw), Math.round(p.y), p.sz, p.sz); }
   ctx.globalAlpha = 1;
-  scope.draw(ctx, W, H, W - (tank ? tank.x : W/2));   // the kit's scope grid, drifting opposite the tank
+  scope.draw(ctx, W, H, W - (tank ? tank.x : W/2));   // 4. the kit's scope grid, drifting opposite the tank
 
-  // field frame + zone ticks
+  // zone ticks (the field's edge is the kit boundary, drawn after the phosphor pass)
   ctx.strokeStyle=C.faint; ctx.beginPath();
-  if (fieldLeft>6){ ctx.moveTo(fieldLeft-0.5, fieldTop); ctx.lineTo(fieldLeft-0.5, padTop); ctx.moveTo(fieldRight+0.5, fieldTop); ctx.lineTo(fieldRight+0.5, padTop); }
   const zy = fieldTop + zoneTop*cell;
   ctx.moveTo(fieldLeft, zy); ctx.lineTo(fieldLeft+cell*0.6, zy); ctx.moveTo(fieldRight, zy); ctx.lineTo(fieldRight-cell*0.6, zy);
-  ctx.moveTo(0, padTop+0.5); ctx.lineTo(W, padTop+0.5); ctx.stroke();
+  ctx.stroke();
 
   drawDrift();
   if (boss) drawBoss();
@@ -1202,7 +1206,7 @@ function render(){
   // tank
   if (beamT>0 && tank && phase==='play'){   // steady beam: no flicker
     const bx = tank.x, half = cell*0.24, baseY = cy(rows-1)-cell*0.9, fl = 0, fade = Math.min(1, beamT/0.15, (1-beamT)/0.06+0.2);
-    ctx.globalAlpha = (0.5 + fl*0.15)*fade; ctx.fillStyle = C.cracked; ctx.fillRect(bx-half, fieldTop, half*2, baseY-fieldTop);
+    ctx.globalAlpha = 0.75*fade; ctx.fillStyle = C.cracked;   // 0.75: the beam's band keeps 3:1 on every hue-sky step ctx.fillRect(bx-half, fieldTop, half*2, baseY-fieldTop);
     ctx.globalAlpha = 0.95*fade; ctx.fillStyle = C.ink; ctx.fillRect(bx-half*0.3, fieldTop, half*0.6, baseY-fieldTop);
     ctx.globalAlpha = 1;
   }
@@ -1233,6 +1237,7 @@ function render(){
   for (const p of popups) vtext(ctx, p.t, p.x, p.y, 0.8, { color:p.color, align:'center', alpha:1-p.age, lw:1.5 });
 
   ctx.setTransform(dpr,0,0,dpr,0,0);   // HUD and overlays stay steady
+  CP.drawVignette(ctx, W, H);   // 6. the kit's vignette, under the HUD
   // HUD: the labelled layout (small dim labels over values), ending where the shell's buttons begin
   drawHudRow();
 
@@ -1257,6 +1262,10 @@ function render(){
     if (bannerWait && bannerT <= BANNER_OUT + 0.01) vtext(ctx, 'PRESS ' + shell.keyFor('fire') + ' OR TAP TO GO ON', W/2, fieldTop+rows*cell*0.45 + 100*ui, 0.75*ui, { align:'center', color:K.inkMuted, lw:1.3 });
   }
   phosphor();
+  // 7. Edge: the kit's 1px boundary round the playfield (the column), outside the phosphor pass so it stays the token.
+  ctx.save(); ctx.translate(Math.round(fieldLeft) - 1, Math.round(fieldTop) - 1);
+  CP.drawPlayAreaBoundary(ctx, Math.round(fieldRight) - Math.round(fieldLeft) + 2, Math.round(padTop) - Math.round(fieldTop) + 2);
+  ctx.restore();
 }
 function drawHudRow(){
   const lx = fieldLeft, ly = 20*ui, vy = 44*ui, ls = 0.75*ui, vs = 1.25*ui;
@@ -1316,7 +1325,7 @@ shell = CP.createShell({
 
 function frame(now){
   const dt = shell.tick(now);
-  if (dt) update(dt);
+  if (dt) { update(dt); sky.update(wave); updateStars(); }   // on game time, as in Asteroids: a paused field holds still
   render();
   shell.draw(ctx, W, H, ui);
   requestAnimationFrame(frame);
