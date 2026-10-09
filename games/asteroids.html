@@ -8,6 +8,7 @@
 <link rel="stylesheet" href="../kit/bundle.css">
 <style>
   html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; overscroll-behavior: none; background: var(--void); }
+  /* The shell's 1px live region lands below the full-height stage; pin it inside so the page never overflows. */
   #game { outline: none; touch-action: none; -webkit-tap-highlight-color: transparent; }
 </style>
 </head>
@@ -2247,8 +2248,8 @@
   function draw() {
     ctx.fillStyle = sky.color();
     ctx.fillRect(0, 0, W, H);
-    const focus = fieldVisible && ship;
-    scopeGrid.draw(ctx, W, H, focus ? ship.x : undefined, focus ? ship.y : undefined);
+    // As the original: the grid leans away from the ship whenever there is one.
+    scopeGrid.draw(ctx, W, H, ship ? ship.x : undefined, ship ? ship.y : undefined);
     drawStars();
 
     if (fieldVisible) {
@@ -2435,6 +2436,7 @@
   // ---------- Shell: the frame around the game ----------
   const sky = CP.createHueSky(); // space-hue-start, +60 every three waves
   let stepAcc = 0;
+  let idleLast = null, idleAcc = 0;
 
   shell = CP.createShell({
     id: 'cp-asteroids',
@@ -2477,6 +2479,13 @@
         stepAcc -= 1;
       }
     }
+    // As the original: on the title and result screens the stars keep
+    // twinkling and the sky keeps easing (pause and settings still freeze).
+    if (shell.state === 'title' || shell.isOver()) {
+      if (idleLast !== null) idleAcc = Math.min(idleAcc + (now - idleLast) * 0.06, 4);
+      idleLast = now;
+      while (idleAcc >= 1) { updateStars(); sky.update(level); idleAcc -= 1; }
+    } else { idleLast = null; idleAcc = 0; }
     if (!shell.isPlaying()) stopThrustSound();
     if (shell.isPlaying()) shell.setScore(score);
     draw();

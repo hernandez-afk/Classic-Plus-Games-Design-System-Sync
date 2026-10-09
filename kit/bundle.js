@@ -1528,7 +1528,7 @@
       if (!live && typeof document !== 'undefined') {
         live = document.createElement('div');
         live.setAttribute('role', 'status'); live.setAttribute('aria-live', 'polite');
-        live.style.cssText = 'position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;';
+        live.style.cssText = 'position:absolute;top:0;left:0;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;';   // pinned to the corner, so it never adds a scroll line below a full-height stage
         document.body.appendChild(live);
       }
       if (opts.intro) {
