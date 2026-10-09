@@ -51,9 +51,17 @@ Every game gets the Shell's shared settings: rebindable single-key controls, hel
 - **Celestipede:** autofire (no mashing). Pickups carry letters. Explosions no longer cycle colours 24 times a second. Messages STAY holds the wave banner.
 - **Moon Miner:** a crash ends the run on the result screen, and PLAY AGAIN retries the mission (the campaign is kept). Timer off makes the drill clock stop for practice. Gems, pads and decks have non-colour marks. Full-screen flashes are under 9% and off under reduced motion. S is settings, so use Down instead of S.
 
-### One background style
+### Backgrounds: the originals, changed only where a rule fails
 
-Every game follows the design system's "One background stack" and its **sister surfaces**: a `void` page and letterbox, the same 80px `grid` with no crosshair, the kit vignette once, and the same 2px `frame` edge round every playfield. The grounds share one brightness: the portrait cabinets (Breakout, Pong) sit on the warm sunrise sky that reports progress, the space games (Asteroids, Celestipede, Moon Miner) on the blue hue sky stepped by wave or moon, with Asteroids' starfield. Pong's sky dawns over its first 10 points; Celestipede's boss and march tints are brief washes of at most 5%.
+Each game keeps its own original background (page colour, ground and how it changes, stars, grid, vignette, edges, bloom). Where the original broke a measured rule, the smallest change was made:
+
+- Breakout: the sunrise sky's last stop is darker (lightness 58% -> 20.6%, same hue and saturation); the original's day sky took the red brick to 2.85:1 and steel to 1:1.
+- Pong: unchanged; every step of its five-colour cycle passes.
+- Asteroids: unchanged; every hue passes.
+- Celestipede: ground lightness 12% -> 10% (the red QUEEN banner was 4.15:1 on some hues), and the beam band at 0.75 opacity instead of 0.5.
+- Moon Miner: the bloom at 0.17 / 0.22 and the beam peak at 0.3 (the original bloom put text under 4.5:1); the vignette is drawn under the HUD (at its darkest it took LOW fuel to 4.2:1 on phones); the X5 pad label is ink.
+
+All five fit with no clipping or scroll at 1280x800, 1000x750, 390x700, 360x640 and in the Test Arcade box.
 
 ### Closed gaps, and what still rests on a second cue
 
